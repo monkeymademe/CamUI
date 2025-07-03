@@ -68,7 +68,8 @@ app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 ####################
 
 # Set debug level to Warning
-Picamera2.set_logging(Picamera2.DEBUG)
+# Removed the debugging due to an issue https://github.com/monkeymademe/CamUI/issues/130 which prevented the server from starting
+#Picamera2.set_logging(Picamera2.DEBUG)
 # Ask picamera2 for what cameras are connected
 global_cameras = Picamera2.global_camera_info()
 
@@ -948,7 +949,7 @@ class CameraObject:
 
     def start_streaming(self):
         self.output = StreamingOutput()
-        self.picam2.start_recording(MJPEGEncoder(), output=FileOutput(self.output))
+        self.picam2.start_recording(JpegEncoder(), output=FileOutput(self.output))
         print_section("Streaming started")
         time.sleep(1)
 
