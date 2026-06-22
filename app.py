@@ -94,7 +94,7 @@ print(f'\nCameras Found:\n{global_cameras}\n')
 # Initialize default values 
 ####################
 
-version = "2.0.1 - BETA"
+version = "2.0.1"
 project_title = "CamUI - for picamera2"
 firmware_control = False
 
