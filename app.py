@@ -30,6 +30,14 @@ plugin_hooks = {
     'after_image_capture': []  # List of callbacks: fn(camera_num, image_path)
 }
 
+# AEC-AGC child controls that only take effect when AeEnable is active on hardware.
+AEC_CHILD_SETTINGS = {
+    "ExposureValue",
+    "AeConstraintMode",
+    "AeExposureMode",
+    "AeMeteringMode",
+}
+
 # Helper to ensure file path is within the intended directory
 def is_safe_path(basedir, path):
     return os.path.realpath(path).startswith(os.path.realpath(basedir))
@@ -227,10 +235,13 @@ class CameraObject:
         # Set capture flag and set placeholder image
         self.use_placeholder = False
         self.placeholder_frame = self.generate_placeholder_frame()  # Create placeholder
+        self._did_runtime_ae_enable_sync = False
         
         # Start Stream and sync metadata
         self.start_streaming()
         self.update_camera_from_metadata()
+        self.apply_profile_controls()
+        self.sync_live_controls()
 
         # Final debug statements
         print_section("Available Camera Controls")
@@ -468,7 +479,49 @@ class CameraObject:
         print(f"\n{self.camera_profile}")
         return camera_json
 
-    def update_settings(self, setting_id, setting_value):
+    def apply_exposure_now(self):
+        """Enable AEC-AGC on hardware so exposure compensation takes effect immediately."""
+        controls_map = self.camera_profile.get("controls") or {}
+        if "AeEnable" not in self.picam2.camera_controls:
+            return {"ok": False, "message": "AeEnable is not supported on this camera"}
+        try:
+            self.update_settings("AeEnable", 1, persist=False)
+            controls_map["AeEnable"] = 1
+            self.camera_profile["controls"] = controls_map
+            time.sleep(0.1)
+            md = self.capture_metadata() or {}
+            return {
+                "ok": True,
+                "message": "AEC-AGC enabled",
+                "ae_enable": md.get("AeEnable", 1),
+                "exposure_time": md.get("ExposureTime"),
+                "analogue_gain": md.get("AnalogueGain"),
+            }
+        except Exception as e:
+            return {"ok": False, "message": str(e)}
+
+    def _aec_should_be_enabled(self):
+        controls = self.camera_profile.get("controls") or {}
+        if "AeEnable" in controls:
+            return bool(controls["AeEnable"])
+        for section in self.live_controls.get("sections", []):
+            for setting in section.get("settings", []):
+                if setting.get("id") == "AeEnable":
+                    value = setting.get("value")
+                    if value is not None:
+                        return bool(value)
+                    return bool(setting.get("default", True))
+        return True
+
+    def _ensure_aec_enabled_for_child_setting(self):
+        if not self._aec_should_be_enabled():
+            return
+        if "AeEnable" not in self.picam2.camera_controls:
+            return
+        self.picam2.set_controls({"AeEnable": 1})
+        self.camera_profile.setdefault("controls", {})["AeEnable"] = 1
+
+    def update_settings(self, setting_id, setting_value, persist=True):
         # Handle sensor mode separately
         if setting_id == "sensor_mode":
             def sensor_mode_task():
@@ -513,10 +566,14 @@ class CameraObject:
                 print(f"⚠️ Error: {e}")
         else:
             # Convert setting_value to correct type
-            if "." in str(setting_value):
+            if isinstance(setting_value, bool):
+                setting_value = int(setting_value)
+            elif "." in str(setting_value):
                 setting_value = float(setting_value)
             else:
                 setting_value = int(setting_value)
+            if setting_id in AEC_CHILD_SETTINGS:
+                self._ensure_aec_enabled_for_child_setting()
             # Apply the setting
             self.picam2.set_controls({setting_id: setting_value})
             # Store in camera_profile["controls"]
@@ -557,10 +614,25 @@ class CameraObject:
     def apply_profile_controls(self):
         if "controls" in self.camera_profile:
             try:
-                for setting_id, setting_value in self.camera_profile["controls"].items():
+                controls_map = self.camera_profile["controls"]
+                # Apply AeEnable first so AEC-AGC child settings take effect.
+                ordered_keys = list(controls_map.keys())
+                if "AeEnable" in ordered_keys:
+                    ordered_keys.remove("AeEnable")
+                    ordered_keys.insert(0, "AeEnable")
+
+                for setting_id in ordered_keys:
+                    setting_value = controls_map[setting_id]
                     self.picam2.set_controls({setting_id: setting_value})
-                    self.update_settings(setting_id, setting_value)  # ✅ Use the loop variables
+                    self.update_settings(setting_id, setting_value, persist=False)
                     print(f"Applied Control: {setting_id} -> {setting_value}")
+
+                for key in ("ExposureTime", "AnalogueGain"):
+                    if key in controls_map:
+                        val = controls_map[key]
+                        self.picam2.set_controls({key: val})
+                        self.update_settings(key, val, persist=False)
+                        print(f"Re-applied Control: {key} -> {val}")
                 print("✅ All profile controls applied successfully")
             except Exception as e:
                 print(f"⚠️ Error applying profile controls: {e}")
@@ -859,6 +931,7 @@ class CameraObject:
     def generate_stream(self):
         consecutive_timeouts = 0
         max_timeouts = 3  # Maximum number of consecutive timeouts before recovery
+        frames_since_start = 0
         
         while True:
             try:
@@ -909,6 +982,12 @@ class CameraObject:
                 #    print(f"⚠️ Error checking resolution: {e}")
                 #    frame = self.placeholder_frame
                 #    continue
+
+                frames_since_start += 1
+                if (not self._did_runtime_ae_enable_sync) and frames_since_start >= 8:
+                    out = self.apply_exposure_now()
+                    self._did_runtime_ae_enable_sync = True
+                    print(f"Runtime AEC-AGC sync result: {out}")
 
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
