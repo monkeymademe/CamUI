@@ -851,6 +851,7 @@ class CameraObject:
             filepath = os.path.join(app.config['upload_folder'], image_name)
             request = self.picam2.capture_request()
             request.save("main", f'{filepath}.jpg')
+            request.release()
             print(f"Image captured successfully. Path: {filepath}")
             return f'{filepath}.jpg'
         except Exception as e:
