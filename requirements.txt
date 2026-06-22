@@ -1,0 +1,3 @@
+flask
+picamera2
+Pillow

@@ -998,6 +998,7 @@ class CameraObject:
             filepath = os.path.join(app.config['upload_folder'], image_name)
             request = self.picam2.capture_request()
             request.save("main", f'{filepath}.jpg')
+            request.release()
             print(f"Image captured successfully. Path: {filepath}")
             return f'{filepath}.jpg'
         except Exception as e:
@@ -1853,6 +1854,7 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=8080, help='Port number to run the web server on')
     parser.add_argument('--ip', type=str, default='0.0.0.0', help='IP to which the web server is bound to')
     args = parser.parse_args()
+    # If there are no arguments the port will be 8080 and ip 0.0.0.0
     context = {'cameras': cameras, 'plugin_hooks': plugin_hooks}
     load_plugins(app, context)
     app.run(host=args.ip, port=args.port)

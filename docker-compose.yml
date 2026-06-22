@@ -1,0 +1,19 @@
+services:
+  camui:
+    build: .
+    privileged: true
+    network_mode: host
+    ipc: host
+    pid: host
+    command: ["python3", "app.py", "--ip", "0.0.0.0", "--port", "8080"]
+    devices:
+      - /dev:/dev
+    shm_size: "512m"
+    volumes:
+      - /run/udev:/run/udev:ro
+      - /dev/dma_heap:/dev/dma_heap
+      - camui-gallery:/app/static/gallery
+    restart: unless-stopped
+
+volumes:
+  camui-gallery:

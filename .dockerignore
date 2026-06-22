@@ -1,0 +1,14 @@
+.git
+.gitignore
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+dist
+build
+.env
+*.md
+LICENSE
+Dockerfile
+.dockerignore
+static/gallery/*
