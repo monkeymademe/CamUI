@@ -70,6 +70,55 @@
     </div>
 
 <div class="mt-4"></div> <!-- Gap between sections -->
+
+{% if tuning is defined and tuning.tuning_available %}
+<div class="accordion" id="tuningAccordion">
+    <div class="accordion-item">
+        <h2 class="accordion-header" id="headingTuning">
+            <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#collapseTuning" aria-expanded="false" aria-controls="collapseTuning">
+                Camera Tuning
+            </button>
+        </h2>
+        <div id="collapseTuning" class="accordion-collapse collapse" aria-labelledby="headingTuning" data-bs-parent="#tuningAccordion">
+            <div class="accordion-body">
+                <p class="text-muted small">
+                    {% if tuning.is_noir_camera %}
+                    NoIR modules often show a purple cast without the correct libcamera tuning file.
+                    {% else %}
+                    Optional libcamera tuning files for this sensor.
+                    {% endif %}
+                    Tuning files are loaded from <code>{{ tuning.tuning_directory }}</code>.
+                    Changing tuning restarts the camera briefly.
+                </p>
+
+                {% if tuning.is_noir_camera and tuning.suggested_noir_file %}
+                <div class="form-check form-switch mb-3">
+                    <input class="form-check-input" type="checkbox" role="switch" id="noirModeToggle"
+                        {% if tuning.noir_mode %}checked{% endif %}>
+                    <label class="form-check-label" for="noirModeToggle">
+                        NoIR mode <span class="text-muted">(uses {{ tuning.suggested_noir_file }})</span>
+                    </label>
+                </div>
+                {% endif %}
+
+                <div class="mb-3">
+                    <label for="tuningFileSelect" class="form-label">Tuning file</label>
+                    <select class="form-select" id="tuningFileSelect">
+                        <option value="default" {% if not tuning.active_tuning_file %}selected{% endif %}>Default (libcamera auto)</option>
+                        {% for filename in tuning.tuning_files %}
+                        <option value="{{ filename }}" {% if tuning.active_tuning_file == filename %}selected{% endif %}>{{ filename }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+
+                <button type="button" class="btn btn-primary" id="applyTuningButton">Apply tuning</button>
+                <div id="tuningAlert" class="alert mt-3 mb-0 d-none" role="alert"></div>
+            </div>
+        </div>
+    </div>
+</div>
+<div class="mt-4"></div>
+{% endif %}
     
 <!-- Sensor Mode Selection Accordion -->
 <div class="accordion" id="sensorModeAccordion">
@@ -483,6 +532,63 @@ function updateRadioChildVisibility(settingId) {
 }
 
 let camera_num = {{ camera.Num }};
+
+function applyCameraTuning() {
+    const alertBox = document.getElementById("tuningAlert");
+    const select = document.getElementById("tuningFileSelect");
+    const noirToggle = document.getElementById("noirModeToggle");
+    if (!select) {
+        return;
+    }
+
+    const tuningFile = select.value === "default" ? null : select.value;
+    const noirMode = noirToggle ? noirToggle.checked : false;
+    const applyButton = document.getElementById("applyTuningButton");
+
+    if (applyButton) {
+        applyButton.disabled = true;
+    }
+    if (alertBox) {
+        alertBox.className = "alert alert-info mt-3 mb-0";
+        alertBox.textContent = "Applying tuning and restarting camera…";
+        alertBox.classList.remove("d-none");
+    }
+
+    fetch(`/set_tuning_${camera_num}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+            tuning_file: tuningFile,
+            noir_mode: noirMode,
+        }),
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (!data.success) {
+            throw new Error(data.error || "Failed to apply tuning");
+        }
+        if (alertBox) {
+            const label = data.tuning_file ? data.tuning_file : "default libcamera tuning";
+            alertBox.className = "alert alert-success mt-3 mb-0";
+            alertBox.textContent = data.reinitialized
+                ? `Tuning applied (${label}). The live feed should recover shortly.`
+                : `Tuning saved (${label}). No restart was needed.`;
+        }
+    })
+    .catch(error => {
+        if (alertBox) {
+            alertBox.className = "alert alert-danger mt-3 mb-0";
+            alertBox.textContent = error.message || "Failed to apply tuning.";
+        }
+    })
+    .finally(() => {
+        if (applyButton) {
+            applyButton.disabled = false;
+        }
+    });
+}
+
+document.getElementById("applyTuningButton")?.addEventListener("click", applyCameraTuning);
 
 // Generic function to send updated settings to Flask
 function updateSetting(settingId, newValue) {

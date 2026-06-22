@@ -43,6 +43,8 @@ AEC_CHILD_SETTINGS = {
 
 VALID_ROTATION_ANGLES = {0, 90, 180, 270}
 
+LIBCAMERA_TUNING_BASE = "/usr/share/libcamera/ipa/rpi"
+
 def camui_log(message):
     """Print safely inside WSGI stream generators (avoids latin-1 stdout UnicodeEncodeError)."""
     text = str(message)
@@ -360,6 +362,115 @@ def save_camera_last_config(config):
     with open(last_config_file_path, 'w') as file:
         json.dump(config, file, indent=4)
 
+def get_tuning_platform_subdir():
+    try:
+        from picamera2.picamera2 import Platform
+        return "vc4" if Picamera2.platform == Platform.Platform.VC4 else "pisp"
+    except Exception:
+        return "pisp"
+
+def get_tuning_directory():
+    return os.path.join(LIBCAMERA_TUNING_BASE, get_tuning_platform_subdir())
+
+def list_available_tuning_files():
+    directory = get_tuning_directory()
+    if not os.path.isdir(directory):
+        return []
+    return sorted(name for name in os.listdir(directory) if name.endswith(".json"))
+
+def tuning_file_exists(filename):
+    if not filename:
+        return False
+    return os.path.isfile(os.path.join(get_tuning_directory(), filename))
+
+def get_tuning_file_path(filename):
+    if not filename:
+        return None
+    path = os.path.join(get_tuning_directory(), filename)
+    return path if os.path.isfile(path) else None
+
+def list_tuning_files_for_sensor(sensor_model):
+    files = list_available_tuning_files()
+    model = (sensor_model or "").lower()
+    if not model:
+        return files
+
+    matched = []
+    for filename in files:
+        stem = filename[:-5].lower()
+        if stem == model or stem.startswith(model + "_") or model.startswith(stem):
+            matched.append(filename)
+    return sorted(set(matched)) if matched else files
+
+def is_noir_camera(sensor_model, camera_module_spec=None):
+    model = (sensor_model or "").lower()
+    if "_noir" in model:
+        return True
+    if not camera_module_spec:
+        return False
+    spec_model = (camera_module_spec.get("sensor_model") or "").lower()
+    module_name = (camera_module_spec.get("module_name") or "").lower()
+    if spec_model != model:
+        return False
+    if "_noir" in spec_model:
+        return True
+    return "noir" in module_name
+
+def is_noir_tuning_filename(filename):
+    if not filename:
+        return False
+    stem = filename[:-5].lower() if filename.lower().endswith(".json") else filename.lower()
+    return stem.endswith("_noir") or "_noir_" in stem
+
+def suggest_noir_tuning_file(sensor_model):
+    if not sensor_model:
+        return None
+    candidates = [
+        f"{sensor_model}_noir.json",
+        f"{sensor_model.split('_')[0]}_noir.json",
+    ]
+    for candidate in candidates:
+        if tuning_file_exists(candidate):
+            return candidate
+    return None
+
+def resolve_tuning_filename(sensor_model, tuning_file=None, noir_mode=False):
+    if noir_mode:
+        suggested = suggest_noir_tuning_file(sensor_model)
+        if suggested:
+            return suggested
+    if tuning_file and tuning_file_exists(tuning_file):
+        return tuning_file
+    return None
+
+def resolve_tuning_path(sensor_model, tuning_file=None, noir_mode=False):
+    filename = resolve_tuning_filename(sensor_model, tuning_file, noir_mode)
+    return get_tuning_file_path(filename)
+
+def get_tuning_ui_context(camera):
+    sensor_model = camera.camera_info.get("Model")
+    module_spec = camera.get_camera_module_spec()
+    noir_camera = is_noir_camera(sensor_model, module_spec)
+    tuning_files = list_tuning_files_for_sensor(sensor_model)
+    if not noir_camera:
+        tuning_files = [f for f in tuning_files if not is_noir_tuning_filename(f)]
+    active_filename = resolve_tuning_filename(
+        sensor_model,
+        camera.camera_info.get("Tuning_File"),
+        camera.camera_info.get("NoIR_Mode", False) if noir_camera else False,
+    )
+    if not noir_camera and is_noir_tuning_filename(active_filename):
+        active_filename = None
+    return {
+        "tuning_files": tuning_files,
+        "active_tuning_file": active_filename,
+        "noir_mode": noir_camera and bool(camera.camera_info.get("NoIR_Mode", False)),
+        "is_noir_camera": noir_camera,
+        "tuning_available": bool(list_available_tuning_files()),
+        "suggested_noir_file": suggest_noir_tuning_file(sensor_model) if noir_camera else None,
+        "tuning_directory": get_tuning_directory(),
+    }
+
 def update_camera_entry_in_last_config(camera_info):
     try:
         if os.path.exists(last_config_file_path):
@@ -377,6 +488,8 @@ def update_camera_entry_in_last_config(camera_info):
                     "Is_Pi_Cam": camera_info.get("Is_Pi_Cam"),
                     "Has_Config": camera_info.get("Has_Config"),
                     "Config_Location": camera_info.get("Config_Location"),
+                    "Tuning_File": camera_info.get("Tuning_File"),
+                    "NoIR_Mode": camera_info.get("NoIR_Mode", False),
                 })
                 updated = True
                 break
@@ -435,6 +548,8 @@ def build_camera_info_from_detection(connected_camera):
         'Is_Pi_Cam': is_pi_cam,
         'Has_Config': False,
         'Config_Location': f"default_{connected_camera['Model']}.json",
+        'Tuning_File': None,
+        'NoIR_Mode': False,
     }
 
 def should_invalidate_cached_camera(old_cam, new_cam):
@@ -508,8 +623,10 @@ class CameraObject:
         self.camera_info = camera
         # Generate default Camera profile
         self.camera_profile = self.generate_camera_profile()
+        self._sync_tuning_from_camera_info()
         # Init camera to picamera2 using the camera number
-        self.picam2 = Picamera2(camera['Num'])
+        self.picam2 = self._create_picam2()
+        self._active_tuning_path = self._resolve_tuning_path()
         # Get Camera specs
         self.camera_module_spec = self.get_camera_module_spec()
         # Fetch Avaialble Sensor modes and generate available resolutions
@@ -691,15 +808,30 @@ class CameraObject:
 
             # ✅ Load the profile before applying any settings
             self.camera_profile = profile_data
-            # ✅ Apply settings after loading the profile
-            self.set_sensor_mode(self.camera_profile.get("sensor_mode", 0))
-            self.set_orientation()
-            self.update_settings('hflip', self.camera_profile['hflip'])
-            self.update_settings('vflip', self.camera_profile['vflip'])
-            self.update_settings('rotation', self.camera_profile.get('rotation', 0))
-            self.update_settings('saveRAW', self.camera_profile['saveRAW'])
-            self.apply_profile_controls()
-            self.sync_live_controls()  # Ensure UI updates with the latest settings
+            tuning_file = profile_data.get("tuning_file")
+            noir_mode = bool(profile_data.get("noir_mode", False))
+            new_tuning_path = resolve_tuning_path(
+                self.camera_info.get("Model"),
+                tuning_file,
+                noir_mode,
+            )
+            self.camera_info["Tuning_File"] = tuning_file
+            self.camera_info["NoIR_Mode"] = noir_mode
+
+            if new_tuning_path != self._active_tuning_path:
+                update_camera_entry_in_last_config(self.camera_info)
+                self.reinitialize_picam2()
+            else:
+                update_camera_entry_in_last_config(self.camera_info)
+                self.set_sensor_mode(self.camera_profile.get("sensor_mode", 0))
+                self.set_orientation()
+                self.update_settings('hflip', self.camera_profile['hflip'])
+                self.update_settings('vflip', self.camera_profile['vflip'])
+                self.update_settings('rotation', self.camera_profile.get('rotation', 0))
+                self.update_settings('saveRAW', self.camera_profile['saveRAW'])
+                self.apply_profile_controls()
+                self.sync_live_controls()
+
             self.camera_info["Has_Config"] = True
             self.camera_info["Config_Location"] = profile_filename
             update_camera_entry_in_last_config(self.camera_info)
@@ -719,8 +851,111 @@ class CameraObject:
             "model": self.camera_info.get("Model", "Unknown"),
             "resolutions": {"StillCaptureResolution": 0, "LiveFeedResolution": 0},
             "saveRAW": False,
+            "tuning_file": None,
+            "noir_mode": False,
             "controls": {},
         }
+
+    def _sync_tuning_from_camera_info(self):
+        module_spec = self.get_camera_module_spec()
+        if not is_noir_camera(self.camera_info.get("Model"), module_spec):
+            self.camera_info["NoIR_Mode"] = False
+            if is_noir_tuning_filename(self.camera_info.get("Tuning_File")):
+                self.camera_info["Tuning_File"] = None
+            self.camera_profile["noir_mode"] = False
+            if is_noir_tuning_filename(self.camera_profile.get("tuning_file")):
+                self.camera_profile["tuning_file"] = None
+            return
+
+        tuning_file = self.camera_info.get("Tuning_File")
+        noir_mode = bool(self.camera_info.get("NoIR_Mode", False))
+        self.camera_profile["tuning_file"] = tuning_file
+        self.camera_profile["noir_mode"] = noir_mode
+
+    def _resolve_tuning_path(self):
+        return resolve_tuning_path(
+            self.camera_info.get("Model"),
+            self.camera_info.get("Tuning_File"),
+            self.camera_info.get("NoIR_Mode", False),
+        )
+
+    def _create_picam2(self):
+        tuning_path = self._resolve_tuning_path()
+        camera_num = self.camera_info["Num"]
+        if tuning_path:
+            camui_log(f"Camera {camera_num}: using tuning file {tuning_path}")
+            return Picamera2(camera_num, tuning=tuning_path)
+        return Picamera2(camera_num)
+
+    def apply_tuning_settings(self, tuning_file=None, noir_mode=False):
+        tuning_file = tuning_file or None
+        if isinstance(tuning_file, str) and not tuning_file.strip():
+            tuning_file = None
+
+        module_spec = self.get_camera_module_spec()
+        noir_camera = is_noir_camera(self.camera_info.get("Model"), module_spec)
+        noir_mode = bool(noir_mode) if noir_camera else False
+        if not noir_camera and is_noir_tuning_filename(tuning_file):
+            tuning_file = None
+        new_path = resolve_tuning_path(
+            self.camera_info.get("Model"),
+            tuning_file,
+            noir_mode,
+        )
+
+        self.camera_info["Tuning_File"] = tuning_file
+        self.camera_info["NoIR_Mode"] = noir_mode
+        self.camera_profile["tuning_file"] = tuning_file
+        self.camera_profile["noir_mode"] = noir_mode
+        update_camera_entry_in_last_config(self.camera_info)
+
+        if new_path == self._active_tuning_path:
+            return {"reinitialized": False, "tuning_file": resolve_tuning_filename(
+                self.camera_info.get("Model"), tuning_file, noir_mode
+            )}
+
+        return self.reinitialize_picam2()
+
+    def reinitialize_picam2(self):
+        saved_profile = json.loads(json.dumps(self.camera_profile))
+        camera_num = self.camera_info["Num"]
+
+        self.use_placeholder = True
+        self.stop_streaming()
+        try:
+            self.picam2.stop()
+        except Exception as e:
+            camui_log(f"Camera {camera_num}: stop before tuning reinit: {e}")
+        try:
+            self.picam2.close()
+        except Exception as e:
+            camui_log(f"Camera {camera_num}: close before tuning reinit: {e}")
+        time.sleep(0.3)
+
+        self.picam2 = self._create_picam2()
+        self._active_tuning_path = self._resolve_tuning_path()
+        self.sensor_modes = self.picam2.sensor_modes
+        self.camera_resolutions = self.generate_camera_resolutions()
+        self.init_configure_camera()
+        self.live_controls = self.initialize_controls_template(self.picam2.camera_controls)
+        self.camera_profile = saved_profile
+        self.camera_init = False
+        self.set_sensor_mode(self.camera_profile.get("sensor_mode", 0))
+        self.apply_profile_controls()
+        self.sync_live_controls()
+        self.start_streaming()
+        self.flush_frames()
+        self._did_runtime_ae_enable_sync = False
+        self.stream_health = default_stream_health()
+        self.use_placeholder = False
+
+        active_filename = resolve_tuning_filename(
+            self.camera_info.get("Model"),
+            self.camera_info.get("Tuning_File"),
+            self.camera_info.get("NoIR_Mode", False),
+        )
+        camui_log(f"Camera {camera_num}: reinitialized with tuning {active_filename or 'default'}")
+        return {"reinitialized": True, "tuning_file": active_filename}
 
     def generate_camera_profile(self):
         self.camera_profile = self._default_camera_profile_dict()
@@ -1209,6 +1444,10 @@ class CameraObject:
 
     def reset_to_default(self):
         # Resets camera settings to default and applies them.
+        had_custom_tuning = self._active_tuning_path is not None
+        self.camera_info["Tuning_File"] = None
+        self.camera_info["NoIR_Mode"] = False
+        update_camera_entry_in_last_config(self.camera_info)
         self.camera_profile = {
             "hflip": 0,
             "vflip": 0,
@@ -1218,8 +1457,15 @@ class CameraObject:
             "model": self.camera_info.get("Model", "Unknown"),
             "resolutions": {"StillCaptureResolution": 0, "LiveFeedResolution": 0},
             "saveRAW": False,
-            "controls": {}  # Empty controls to be updated later
+            "tuning_file": None,
+            "noir_mode": False,
+            "controls": {},
         }
+        if had_custom_tuning:
+            self.reinitialize_picam2()
+            print("Camera profile reset to default (tuning reinitialized).")
+            return
+
         # Reset key settings
         self.set_sensor_mode(self.camera_profile["sensor_mode"])
         self.set_orientation()
@@ -2137,7 +2383,7 @@ def timelapse(camera_num):
     camera = cameras.get(camera_num)
     if not camera:
         return render_template("camera_not_found.html", camera_num=camera_num), 404
-    return render_template(
+        return render_template(
         "timelapse.html",
         camera=camera.camera_info,
         camera_module=camera.camera_module_spec,
@@ -2147,6 +2393,7 @@ def timelapse(camera_num):
         profiles=list_profiles(),
         mode="timelapse",
         active_page="timelapse",
+        tuning=get_tuning_ui_context(camera),
     )
 
 @app.route("/timelapse/start", methods=["POST"])
@@ -2434,7 +2681,7 @@ def camera_mobile(camera_num):
         # Find the last image taken by this specific camera
         last_image = None
         last_image = image_gallery_manager.find_last_image_taken()
-        return render_template('camera_mobile.html', camera=camera.camera_info, settings=live_controls, sensor_modes=sensor_modes, active_mode_index=active_mode_index, last_image=last_image, profiles=list_profiles(),navbar=False, theme='dark', mode="mobile") 
+        return render_template('camera_mobile.html', camera=camera.camera_info, settings=live_controls, sensor_modes=sensor_modes, active_mode_index=active_mode_index, last_image=last_image, profiles=list_profiles(), navbar=False, theme='dark', mode="mobile", tuning=get_tuning_ui_context(camera)) 
     except Exception as e:
         print(f"Error loading camera view: {e}")
         return render_template('error.html', error=str(e))
@@ -2452,7 +2699,7 @@ def camera(camera_num):
         # Find the last image taken by this specific camera
         last_image = None
         last_image = image_gallery_manager.find_last_image_taken()
-        return render_template('camera.html', camera=camera.camera_info, settings=live_controls, sensor_modes=sensor_modes, active_mode_index=active_mode_index, last_image=last_image, profiles=list_profiles(), mode="desktop")
+        return render_template('camera.html', camera=camera.camera_info, settings=live_controls, sensor_modes=sensor_modes, active_mode_index=active_mode_index, last_image=last_image, profiles=list_profiles(), mode="desktop", tuning=get_tuning_ui_context(camera))
     except Exception as e:
         print(f"Error loading camera view: {e}")
         return render_template('error.html', error=str(e))
@@ -2565,6 +2812,25 @@ def preview(camera_num):
             return jsonify(success=True, message="Photo captured successfully", image_path=preview_path)
     except Exception as e:
         return jsonify(success=False, message=str(e))
+
+@app.route('/set_tuning_<int:camera_num>', methods=['POST'])
+def set_tuning(camera_num):
+    try:
+        camera = cameras.get(camera_num)
+        if not camera:
+            return jsonify({"success": False, "error": "Camera not found"}), 404
+        if timelapse_manager.is_running(int(camera_num)):
+            return jsonify({"success": False, "error": "Cannot change tuning while timelapse is running"}), 409
+
+        data = request.get_json(silent=True) or {}
+        tuning_file = data.get("tuning_file")
+        if tuning_file in ("", "default", None):
+            tuning_file = None
+        noir_mode = bool(data.get("noir_mode", False))
+        result = camera.apply_tuning_settings(tuning_file, noir_mode)
+        return jsonify({"success": True, **result})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/update_setting', methods=['POST'])
 def update_setting():
