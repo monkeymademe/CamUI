@@ -1270,51 +1270,101 @@ class ImageGallery:
         self.items_per_page = items_per_page
         self.items_per_page = 12
 
-    def get_image_files(self):
-         # Fetch image file details, including timestamps, resolution, and DNG presence.
+    def _list_gallery_jpg_files(self):
         try:
-            image_files = [f for f in os.listdir(self.upload_folder) if f.endswith('.jpg')]
-            files_and_timestamps = []
-
-            for image_file in image_files:
-                # Extract timestamp from filename
-                try:
-                    unix_timestamp = int(image_file.split('_')[-1].split('.')[0])
-                    timestamp = datetime.utcfromtimestamp(unix_timestamp).strftime('%Y-%m-%d %H:%M:%S')
-                except ValueError:
-                    print(f"Skipping file {image_file} due to incorrect timestamp format")
-                    continue  # Skip files with incorrect format
-
-                # Check if corresponding .dng file exists
-                dng_file = os.path.splitext(image_file)[0] + '.dng'
-                has_dng = os.path.exists(os.path.join(self.upload_folder, dng_file))
-
-                # Get image resolution
-                img_path = os.path.join(self.upload_folder, image_file)
-                with Image.open(img_path) as img:
-                    width, height = img.size
-
-                # Append file details
-                files_and_timestamps.append({
-                    'filename': image_file,
-                    'timestamp': timestamp,
-                    'has_dng': has_dng,
-                    'dng_file': dng_file,
-                    'width': width,
-                    'height': height
-                })
-
-            # Sort files by timestamp (newest first)
-            files_and_timestamps.sort(key=lambda x: x['timestamp'], reverse=True)
-            return files_and_timestamps
-
-        except Exception as e:
-            print(f"Error loading image files: {e}")
+            return [f for f in os.listdir(self.upload_folder) if f.endswith('.jpg')]
+        except OSError as e:
+            print(f"Error listing gallery folder: {e}")
             return []
 
-    def paginate_images(self, page):
+    def _inspect_gallery_image(self, image_file):
+        img_path = os.path.join(self.upload_folder, image_file)
+        try:
+            file_size = os.path.getsize(img_path)
+        except OSError as e:
+            return None, {
+                'filename': image_file,
+                'error': str(e),
+                'file_size': 0,
+                'timestamp': 'Unknown',
+            }
+
+        try:
+            unix_timestamp = int(image_file.split('_')[-1].split('.')[0])
+            timestamp = datetime.utcfromtimestamp(unix_timestamp).strftime('%Y-%m-%d %H:%M:%S')
+        except ValueError:
+            return None, {
+                'filename': image_file,
+                'error': 'Invalid filename timestamp format',
+                'file_size': file_size,
+                'timestamp': 'Unknown',
+            }
+
+        dng_file = os.path.splitext(image_file)[0] + '.dng'
+        has_dng = os.path.exists(os.path.join(self.upload_folder, dng_file))
+
+        try:
+            with Image.open(img_path) as img:
+                width, height = img.size
+        except Exception as e:
+            return None, {
+                'filename': image_file,
+                'error': str(e),
+                'file_size': file_size,
+                'timestamp': timestamp,
+                'has_dng': has_dng,
+                'dng_file': dng_file,
+            }
+
+        return {
+            'filename': image_file,
+            'timestamp': timestamp,
+            'has_dng': has_dng,
+            'dng_file': dng_file,
+            'width': width,
+            'height': height,
+        }, None
+
+    def scan_gallery_images(self):
+        valid_images = []
+        corrupt_images = []
+
+        for image_file in self._list_gallery_jpg_files():
+            valid, corrupt = self._inspect_gallery_image(image_file)
+            if valid:
+                valid_images.append(valid)
+            elif corrupt:
+                print(f"Unreadable gallery image {image_file}: {corrupt['error']}")
+                corrupt_images.append(corrupt)
+
+        valid_images.sort(key=lambda x: x['timestamp'], reverse=True)
+        corrupt_images.sort(key=lambda x: x['filename'], reverse=True)
+        return valid_images, corrupt_images
+
+    def get_image_files(self):
+        valid_images, _ = self.scan_gallery_images()
+        return valid_images
+
+    def get_corrupt_image_files(self):
+        _, corrupt_images = self.scan_gallery_images()
+        return corrupt_images
+
+    def purge_corrupt_images(self):
+        corrupt_images = self.get_corrupt_image_files()
+        deleted = []
+        errors = []
+        for item in corrupt_images:
+            success, message = self.delete_image(item['filename'])
+            if success:
+                deleted.append(item['filename'])
+            else:
+                errors.append(f"{item['filename']}: {message}")
+        return deleted, errors
+
+    def paginate_images(self, page, all_images=None):
         """Paginate images dynamically after an image is deleted."""
-        all_images = self.get_image_files()
+        if all_images is None:
+            all_images = self.get_image_files()
         
         # Recalculate total pages dynamically
         total_pages = max((len(all_images) + self.items_per_page - 1) // self.items_per_page, 1)
@@ -2212,28 +2262,16 @@ def timelapse_export_context(session_info):
 @app.route('/image_gallery')
 def image_gallery():
     page = request.args.get('page', 1, type=int)
-    images, total_pages = image_gallery_manager.paginate_images(page)
+    all_images, corrupt_files = image_gallery_manager.scan_gallery_images()
+    images, total_pages = image_gallery_manager.paginate_images(page, all_images)
     cameras_data = [(camera_num, camera) for camera_num, camera in cameras.items()]
     timelapse_count = len(refresh_timelapse_sessions())
-    if not images:
-        return render_template(
-            'image_gallery.html',
-            image_files=[],
-            page=1,
-            total_pages=1,
-            start_page=1,
-            end_page=1,
-            cameras_data=cameras_data,
-            active_page='image_gallery',
-            timelapse_count=timelapse_count,
-            empty_gallery=True,
-        )
-    # Define pagination bounds
-    start_page = max(1, page - 2)  # Show previous 2 pages
-    end_page = min(total_pages, page + 2)  # Show next 2 pages
+    start_page = max(1, page - 2)
+    end_page = min(total_pages, page + 2)
     return render_template(
         'image_gallery.html',
         image_files=images,
+        corrupt_files=corrupt_files,
         page=page,
         total_pages=total_pages,
         start_page=start_page,
@@ -2241,7 +2279,7 @@ def image_gallery():
         cameras_data=cameras_data,
         active_page='image_gallery',
         timelapse_count=timelapse_count,
-        empty_gallery=False,
+        empty_gallery=not all_images,
     )
 
 @app.route('/get_image_for_page')
@@ -2434,6 +2472,19 @@ def delete_image(filename):
         return jsonify({"success": True, "message": message}), 200
     else:
         return jsonify({"success": False, "message": message}), 500
+
+@app.route('/purge_corrupt_images', methods=['POST'])
+def purge_corrupt_images():
+    deleted, errors = image_gallery_manager.purge_corrupt_images()
+    if errors and not deleted:
+        return jsonify({"success": False, "message": "; ".join(errors)}), 500
+    return jsonify({
+        "success": True,
+        "deleted": deleted,
+        "deleted_count": len(deleted),
+        "errors": errors,
+        "message": f"Removed {len(deleted)} unreadable file(s).",
+    })
 
 @app.route('/image_edit/<filename>')
 def edit_image(filename):

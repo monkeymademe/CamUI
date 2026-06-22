@@ -15,7 +15,7 @@
                             <h5 class="modal-title" id="deleteConfirmationModalLabel">Confirm Deletion</h5>
                             <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                         </div>
-                        <div class="modal-body">
+                        <div class="modal-body" id="deleteConfirmationModalBody">
                             Are you sure you want to delete this image?
                         </div>
                         <div class="modal-footer">
@@ -65,7 +65,11 @@
                                         <button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.location.href='/image_edit/{{ file_data['filename'] }}'" data-bs-toggle="tooltip" data-bs-title="Edit Image">
                                             <i class="bi bi-pencil"></i>
                                         </button>
-                                        <button type="button" class="btn btn-sm btn-outline-danger" onclick="openDeleteConfirmationModal('{{ file_data['filename'] }}')" data-bs-toggle="tooltip" data-bs-title="Delete Image">
+                                        <button type="button" class="btn btn-sm btn-outline-danger gallery-delete-btn"
+                                            data-bs-toggle="modal"
+                                            data-bs-target="#deleteConfirmationModal"
+                                            data-filename="{{ file_data['filename'] }}"
+                                            title="Delete Image">
                                             <i class="bi bi-trash"></i>
                                         </button>
                                         <button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.location.href='/download_image/{{ file_data['filename'] }}'" data-bs-toggle="tooltip" data-bs-title="Download Image">
@@ -83,6 +87,56 @@
                     </div>
                     {% endfor %}
                 </div>
+
+                {% if corrupt_files %}
+                <div class="mt-5" id="corrupt-gallery-section">
+                    <div class="d-flex justify-content-between align-items-center mb-3">
+                        <div>
+                            <h5 class="mb-1">Unreadable images</h5>
+                            <p class="text-muted mb-0">
+                                These files are in the gallery folder but could not be opened. They are hidden from the main gallery until removed.
+                            </p>
+                        </div>
+                        <button type="button" class="btn btn-danger gallery-purge-corrupt-btn"
+                            data-bs-toggle="modal"
+                            data-bs-target="#deleteConfirmationModal"
+                            data-corrupt-count="{{ corrupt_files|length }}">
+                            <i class="bi bi-trash"></i> Delete all unreadable
+                        </button>
+                    </div>
+                    <div class="row row-cols-1 row-cols-sm-2 row-cols-md-3 g-3" id="corrupt-image-gallery">
+                        {% for file_data in corrupt_files %}
+                        <div class="col" id="corrupt_card_{{ file_data['filename'] }}">
+                            <div class="card shadow-sm border-warning">
+                                <div class="card-img-top d-flex align-items-center justify-content-center bg-secondary-subtle text-warning-emphasis" style="min-height: 160px;">
+                                    <div class="text-center px-3">
+                                        <i class="bi bi-exclamation-triangle fs-1"></i>
+                                        <div class="small mt-2">Cannot display preview</div>
+                                    </div>
+                                </div>
+                                <div class="card-body">
+                                    <p class="card-text">
+                                        <strong>{{ file_data['filename'] }}</strong><br>
+                                        {% if file_data['timestamp'] != 'Unknown' %}
+                                        Date in filename: {{ file_data['timestamp'] }}<br>
+                                        {% endif %}
+                                        Size: {{ file_data['file_size'] }} bytes<br>
+                                        <span class="text-danger small">{{ file_data['error'] }}</span>
+                                    </p>
+                                    <button type="button" class="btn btn-sm btn-outline-danger gallery-delete-btn"
+                                        data-bs-toggle="modal"
+                                        data-bs-target="#deleteConfirmationModal"
+                                        data-filename="{{ file_data['filename'] }}"
+                                        title="Delete unreadable file">
+                                        <i class="bi bi-trash"></i> Delete
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
             </div>
 
         </div>
@@ -121,110 +175,190 @@
     </div>
 </footer>
 <script>
-    function openDeleteConfirmationModal(filename) {
-        const modal = new bootstrap.Modal(document.getElementById('deleteConfirmationModal'));
-        const confirmButton = document.getElementById('confirmDeleteButton');
-        confirmButton.setAttribute('data-filename', filename);
-        modal.show();
+(function () {
+    const modalEl = document.getElementById('deleteConfirmationModal');
+    const confirmButton = document.getElementById('confirmDeleteButton');
+    const modalBody = document.getElementById('deleteConfirmationModalBody');
+
+    if (!modalEl || !confirmButton || !modalBody) {
+        return;
     }
-    
-    document.getElementById('confirmDeleteButton').addEventListener('click', function () {
-    const selectedFilename = this.getAttribute('data-filename');
-    console.log("Deleting:", selectedFilename);
 
-    fetch(`/delete_image/${selectedFilename}`, { method: 'DELETE' })
-        .then(response => {
-            if (!response.ok) throw new Error("Delete failed");
-            return response.json();
-        })
-        .then(() => {
-            // Get the current page number safely
-            let activePageElement = document.querySelector('.page-item.active a');
-            let currentPage = activePageElement ? parseInt(activePageElement.textContent) : 1;
-            if (isNaN(currentPage)) currentPage = 1;
+    modalEl.addEventListener('show.bs.modal', function (event) {
+        const trigger = event.relatedTarget;
+        if (!trigger) {
+            return;
+        }
 
-            const fetchUrl = `/get_image_for_page?page=${currentPage}`;
-            console.log("Fetching:", fetchUrl);
-            return fetch(fetchUrl);
-        })
-        .then(response => response.json())
-        .then(data => {
-            // Update gallery (same as before)
-            const gallery = document.getElementById('image-gallery');
-            gallery.innerHTML = '';
-            data.image_files.forEach(fileData => {
-                const card = document.createElement('div');
-                card.classList.add('col');
-                card.id = `card_${fileData.filename}`;
-                card.innerHTML = `
-                    <div class="card shadow-sm">
-                        <a href="/view_image/${fileData.filename}">
-                            <img src="/static/gallery/${fileData.filename}" alt="${fileData.filename}" class="bd-placeholder-img card-img-top" width="100%">
-                            ${fileData.has_dng ? `<span class="badge rounded-pill text-bg-secondary position-absolute top-0 end-0 m-2">DNG</span>` : ''}
-                        </a>
-                        <div class="card-body">
-                            <p class="card-text">
-                                Date taken: ${fileData.timestamp}<br>
-                                Resolution: ${fileData.width}x${fileData.height}
-                            </p>
-                            <div class="d-flex justify-content-between align-items-center">
-                                <div class="btn-group">
-                                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.location.href='/image_edit/${fileData.filename}'" data-bs-toggle="tooltip" data-bs-title="Edit Image">
-                                        <i class="bi bi-pencil"></i>
-                                    </button>
-                                    <button type="button" class="btn btn-sm btn-outline-danger" onclick="openDeleteConfirmationModal('${fileData.filename}')" data-bs-toggle="tooltip" data-bs-title="Delete Image">
-                                        <i class="bi bi-trash"></i>
-                                    </button>
-                                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.location.href='/download_image/${fileData.filename}'" data-bs-toggle="tooltip" data-bs-title="Download Image">
-                                        <i class="bi bi-download"></i>
-                                    </button>
-                                    ${fileData.has_dng ? `
-                                    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.location.href='/download_image/${fileData.dng_file}'" data-bs-toggle="tooltip" data-bs-title="Download DNG">
-                                        <i class="bi bi-file-earmark-arrow-down"></i>
-                                    </button>` : ''}
+        if (trigger.classList.contains('gallery-purge-corrupt-btn')) {
+            const corruptCount = trigger.dataset.corruptCount
+                || document.querySelectorAll('#corrupt-image-gallery .col').length;
+            confirmButton.dataset.action = 'purge';
+            delete confirmButton.dataset.filename;
+            modalBody.textContent = `Delete all ${corruptCount} unreadable image(s) from the gallery folder? This cannot be undone.`;
+            return;
+        }
+
+        if (trigger.classList.contains('gallery-delete-btn') && trigger.dataset.filename) {
+            confirmButton.dataset.action = 'single';
+            confirmButton.dataset.filename = trigger.dataset.filename;
+            modalBody.textContent = `Are you sure you want to delete ${trigger.dataset.filename}?`;
+        }
+    });
+
+    function purgeCorruptImages() {
+        confirmButton.disabled = true;
+
+        return fetch('/purge_corrupt_images', { method: 'POST' })
+            .then(response => response.json())
+            .then(data => {
+                if (!data.success) {
+                    throw new Error(data.message || 'Purge failed');
+                }
+                document.getElementById('corrupt-gallery-section')?.remove();
+                bootstrap.Modal.getInstance(modalEl)?.hide();
+            })
+            .catch(error => {
+                console.error('Error purging corrupt images:', error);
+                alert('Failed to delete unreadable images: ' + error.message);
+            })
+            .finally(() => {
+                confirmButton.disabled = false;
+            });
+    }
+
+    confirmButton.addEventListener('click', function () {
+        const action = confirmButton.dataset.action || 'single';
+
+        if (action === 'purge') {
+            purgeCorruptImages();
+            return;
+        }
+
+        const selectedFilename = confirmButton.dataset.filename;
+        if (!selectedFilename) {
+            return;
+        }
+
+        confirmButton.disabled = true;
+
+        fetch(`/delete_image/${selectedFilename}`, { method: 'DELETE' })
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error('Delete failed');
+                }
+                return response.json();
+            })
+            .then(() => {
+                const corruptCard = document.getElementById(`corrupt_card_${selectedFilename}`);
+                if (corruptCard) {
+                    corruptCard.remove();
+                    const corruptGallery = document.getElementById('corrupt-image-gallery');
+                    if (corruptGallery && corruptGallery.children.length === 0) {
+                        document.getElementById('corrupt-gallery-section')?.remove();
+                    }
+                    bootstrap.Modal.getInstance(modalEl)?.hide();
+                    confirmButton.blur();
+                    return null;
+                }
+
+                let activePageElement = document.querySelector('.page-item.active a');
+                let currentPage = activePageElement ? parseInt(activePageElement.textContent, 10) : 1;
+                if (Number.isNaN(currentPage)) {
+                    currentPage = 1;
+                }
+
+                return fetch(`/get_image_for_page?page=${currentPage}`);
+            })
+            .then(response => {
+                if (!response) {
+                    return null;
+                }
+                return response.json();
+            })
+            .then(data => {
+                if (!data) {
+                    return;
+                }
+
+                const gallery = document.getElementById('image-gallery');
+                gallery.innerHTML = '';
+                data.image_files.forEach(fileData => {
+                    const card = document.createElement('div');
+                    card.classList.add('col');
+                    card.id = `card_${fileData.filename}`;
+                    card.innerHTML = `
+                        <div class="card shadow-sm">
+                            <a href="/view_image/${fileData.filename}">
+                                <img src="/static/gallery/${fileData.filename}" alt="${fileData.filename}" class="bd-placeholder-img card-img-top" width="100%">
+                                ${fileData.has_dng ? '<span class="badge rounded-pill text-bg-secondary position-absolute top-0 end-0 m-2">DNG</span>' : ''}
+                            </a>
+                            <div class="card-body">
+                                <p class="card-text">
+                                    Date taken: ${fileData.timestamp}<br>
+                                    Resolution: ${fileData.width}x${fileData.height}
+                                </p>
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <div class="btn-group">
+                                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.location.href='/image_edit/${fileData.filename}'" title="Edit Image">
+                                            <i class="bi bi-pencil"></i>
+                                        </button>
+                                        <button type="button" class="btn btn-sm btn-outline-danger gallery-delete-btn"
+                                            data-bs-toggle="modal"
+                                            data-bs-target="#deleteConfirmationModal"
+                                            data-filename="${fileData.filename}"
+                                            title="Delete Image">
+                                            <i class="bi bi-trash"></i>
+                                        </button>
+                                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.location.href='/download_image/${fileData.filename}'" title="Download Image">
+                                            <i class="bi bi-download"></i>
+                                        </button>
+                                        ${fileData.has_dng ? `
+                                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.location.href='/download_image/${fileData.dng_file}'" title="Download DNG">
+                                            <i class="bi bi-file-earmark-arrow-down"></i>
+                                        </button>` : ''}
+                                    </div>
                                 </div>
                             </div>
                         </div>
-                    </div>
-                `;
-                gallery.appendChild(card);
+                    `;
+                    gallery.appendChild(card);
+                });
+
+                const paginationContainer = document.querySelector('ul.pagination');
+                if (paginationContainer) {
+                    paginationContainer.innerHTML = `
+                        <li class="page-item ${data.page === 1 ? 'disabled' : ''}">
+                            ${data.page === 1
+                                ? '<span class="page-link">Previous</span>'
+                                : `<a class="page-link" href="?page=${data.page - 1}">Previous</a>`}
+                        </li>
+                        ${Array.from({ length: data.end_page - data.start_page + 1 }, (_, i) => {
+                            const pageNum = data.start_page + i;
+                            return `
+                                <li class="page-item ${pageNum === data.page ? 'active' : ''}">
+                                    <a class="page-link" href="?page=${pageNum}">${pageNum}</a>
+                                </li>`;
+                        }).join('')}
+                        <li class="page-item ${data.page === data.total_pages ? 'disabled' : ''}">
+                            ${data.page === data.total_pages
+                                ? '<span class="page-link">Next</span>'
+                                : `<a class="page-link" href="?page=${data.page + 1}">Next</a>`}
+                        </li>
+                    `;
+                }
+
+                bootstrap.Modal.getInstance(modalEl)?.hide();
+                confirmButton.blur();
+            })
+            .catch(error => {
+                console.error('Error during deletion:', error);
+            })
+            .finally(() => {
+                confirmButton.disabled = false;
             });
-
-            // Update pagination (same as before)
-            const paginationContainer = document.querySelector('ul.pagination');
-            paginationContainer.innerHTML = `
-                <li class="page-item ${data.page === 1 ? 'disabled' : ''}">
-                    ${data.page === 1
-                        ? `<span class="page-link">Previous</span>`
-                        : `<a class="page-link" href="?page=${data.page - 1}">Previous</a>`}
-                </li>
-                ${Array.from({ length: data.end_page - data.start_page + 1 }, (_, i) => {
-                    const pageNum = data.start_page + i;
-                    return `
-                        <li class="page-item ${pageNum === data.page ? 'active' : ''}">
-                            <a class="page-link" href="?page=${pageNum}">${pageNum}</a>
-                        </li>`;
-                }).join('')}
-                <li class="page-item ${data.page === data.total_pages ? 'disabled' : ''}">
-                    ${data.page === data.total_pages
-                        ? `<span class="page-link">Next</span>`
-                        : `<a class="page-link" href="?page=${data.page + 1}">Next</a>`}
-                </li>
-            `;
-
-            // Close the modal properly
-            const modalElement = document.getElementById('deleteConfirmationModal');
-            const modalInstance = bootstrap.Modal.getInstance(modalElement);
-            if (modalInstance) {
-                modalInstance.hide();
-                // Optionally, remove focus from the modal's confirm button
-                this.blur(); // This removes focus from the button
-            }
-        })
-        .catch(error => {
-            console.error("Error during deletion:", error);
-        });
-});
-    </script>
+    });
+})();
+</script>
 
 {% endblock %}
