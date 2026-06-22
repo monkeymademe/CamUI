@@ -51,6 +51,30 @@ def camui_log(message):
     except UnicodeEncodeError:
         print(text.encode("ascii", "replace").decode("ascii"))
 
+STREAM_FRAME_TIMEOUT_SEC = 5.0
+STREAM_MAX_CONSECUTIVE_TIMEOUTS = 3
+STREAM_MAX_CONSECUTIVE_ERRORS = 3
+STREAM_ERROR_BACKOFF_SEC = 0.5
+STREAM_FAILED_RECOVERY_ATTEMPTS = 3
+STREAM_RECOVERY_COOLDOWN_SEC = 10.0
+STREAM_STALE_FRAME_SEC = 15.0
+STREAM_WATCHDOG_INTERVAL_SEC = 5.0
+
+def default_stream_health():
+    now = time.time()
+    return {
+        "status": "ok",
+        "message": "Stream running normally",
+        "last_error": None,
+        "last_frame_at": now,
+        "consecutive_timeouts": 0,
+        "consecutive_errors": 0,
+        "recovery_attempts": 0,
+        "failed_recovery_attempts": 0,
+        "resolution_stepdowns": 0,
+        "last_recovery_at": None,
+    }
+
 # Helper to ensure file path is within the intended directory
 def is_safe_path(basedir, path):
     return os.path.realpath(path).startswith(os.path.realpath(basedir))
@@ -507,9 +531,12 @@ class CameraObject:
         self.use_placeholder = False
         self.placeholder_frame = self.generate_placeholder_frame()  # Create placeholder
         self._did_runtime_ae_enable_sync = False
+        self.stream_health_lock = threading.Lock()
+        self.stream_health = default_stream_health()
         
         # Start Stream and sync metadata
         self.start_streaming()
+        self._start_stream_watchdog()
         self.update_camera_from_metadata()
         self.apply_profile_controls()
         self.sync_live_controls()
@@ -1286,9 +1313,142 @@ class CameraObject:
                 camui_log(f"Flush error: {e}")
                 break
 
+    def _update_stream_health(self, **kwargs):
+        with self.stream_health_lock:
+            self.stream_health.update(kwargs)
+
+    def _record_stream_frame_success(self):
+        with self.stream_health_lock:
+            self.stream_health["last_frame_at"] = time.time()
+            self.stream_health["consecutive_timeouts"] = 0
+            self.stream_health["consecutive_errors"] = 0
+            if self.stream_health["status"] in ("recovering", "degraded"):
+                self.stream_health["status"] = "ok"
+                self.stream_health["message"] = "Stream running normally"
+                self.stream_health["last_error"] = None
+
+    def _step_down_live_feed_resolution(self):
+        resolutions = self.camera_profile.get("resolutions", {})
+        current = int(resolutions.get("LiveFeedResolution", 0))
+        if current <= 0 or current >= len(self.camera_resolutions):
+            camui_log("Cannot step down live feed resolution further")
+            return False
+
+        new_index = current - 1
+        width, height = self.camera_resolutions[new_index]
+        try:
+            self.set_live_feed_resolution(new_index)
+            self.camera_profile["resolutions"]["LiveFeedResolution"] = new_index
+            self.sync_live_controls()
+            with self.stream_health_lock:
+                self.stream_health["resolution_stepdowns"] += 1
+            self._update_stream_health(
+                status="degraded",
+                message=f"Live feed lowered to {width}x{height} to improve stability",
+            )
+            camui_log(f"Live feed resolution stepped down to {width}x{height}")
+            return True
+        except Exception as e:
+            camui_log(f"Failed to step down live feed resolution: {e}")
+            return False
+
+    def _attempt_stream_recovery(self, reason):
+        with self.stream_health_lock:
+            last_recovery = self.stream_health.get("last_recovery_at") or 0
+            if time.time() - last_recovery < STREAM_RECOVERY_COOLDOWN_SEC:
+                return False
+            self.stream_health["status"] = "recovering"
+            self.stream_health["message"] = f"Recovering stream: {reason}"
+            self.stream_health["recovery_attempts"] += 1
+            self.stream_health["last_recovery_at"] = time.time()
+
+        if self.safe_restart_stream():
+            self._update_stream_health(
+                status="ok",
+                message="Stream recovered",
+                last_error=None,
+                consecutive_timeouts=0,
+                consecutive_errors=0,
+                failed_recovery_attempts=0,
+            )
+            return True
+
+        with self.stream_health_lock:
+            self.stream_health["failed_recovery_attempts"] += 1
+            failed = self.stream_health["failed_recovery_attempts"]
+            self.stream_health["last_error"] = reason
+
+        if failed >= STREAM_FAILED_RECOVERY_ATTEMPTS:
+            if self._step_down_live_feed_resolution():
+                with self.stream_health_lock:
+                    self.stream_health["failed_recovery_attempts"] = 0
+            else:
+                self._update_stream_health(
+                    status="failed",
+                    message="Stream recovery failed; restart CamUI or lower resolution manually",
+                )
+        else:
+            self._update_stream_health(
+                status="degraded",
+                message=f"Stream recovery failed ({failed}/{STREAM_FAILED_RECOVERY_ATTEMPTS})",
+            )
+        return False
+
+    def get_stream_health(self):
+        with self.stream_health_lock:
+            health = dict(self.stream_health)
+
+        res_index = int(self.camera_profile.get("resolutions", {}).get("LiveFeedResolution", 0))
+        if 0 <= res_index < len(self.camera_resolutions):
+            width, height = self.camera_resolutions[res_index]
+            health["live_feed_resolution"] = f"{width}x{height}"
+        else:
+            health["live_feed_resolution"] = None
+        health["live_feed_resolution_index"] = res_index
+
+        age = max(0.0, time.time() - float(health.get("last_frame_at") or 0))
+        health["last_frame_age_ms"] = int(age * 1000)
+
+        if (
+            health["status"] == "ok"
+            and not self.use_placeholder
+            and age > STREAM_STALE_FRAME_SEC
+        ):
+            health["status"] = "degraded"
+            health["message"] = f"No new frame for {int(age)}s"
+
+        health["using_placeholder"] = bool(self.use_placeholder)
+        return health
+
+    def _start_stream_watchdog(self):
+        camera_num = self.camera_info.get("Num")
+
+        def watch():
+            while True:
+                time.sleep(STREAM_WATCHDOG_INTERVAL_SEC)
+                if self.use_placeholder:
+                    continue
+                health = self.get_stream_health()
+                if health["status"] in ("recovering", "failed"):
+                    continue
+                if health["last_frame_age_ms"] > int(STREAM_STALE_FRAME_SEC * 1000):
+                    camui_log(
+                        f"Camera {camera_num}: stream stale "
+                        f"({health['last_frame_age_ms']}ms), attempting recovery"
+                    )
+                    self._attempt_stream_recovery(
+                        f"no frame for {health['last_frame_age_ms'] // 1000}s"
+                    )
+
+        thread = threading.Thread(
+            target=watch,
+            daemon=True,
+            name=f"stream-watchdog-{camera_num}",
+        )
+        thread.start()
+
     def generate_stream(self):
         consecutive_timeouts = 0
-        max_timeouts = 3  # Maximum number of consecutive timeouts before recovery
         frames_since_start = 0
         
         while True:
@@ -1297,18 +1457,24 @@ class CameraObject:
                     frame = self.placeholder_frame
                 else:
                     with self.output.condition:
-                        notified = self.output.condition.wait(timeout=5.0)
+                        notified = self.output.condition.wait(timeout=STREAM_FRAME_TIMEOUT_SEC)
                         if not notified:
                             camui_log("Timed out waiting for frame.")
                             consecutive_timeouts += 1
-                            if consecutive_timeouts >= max_timeouts:
+                            with self.stream_health_lock:
+                                self.stream_health["consecutive_timeouts"] = consecutive_timeouts
+                            if consecutive_timeouts >= STREAM_MAX_CONSECUTIVE_TIMEOUTS:
                                 camui_log("Too many consecutive timeouts, attempting stream recovery...")
-                                self.safe_restart_stream()
+                                self._attempt_stream_recovery("frame timeouts")
                                 consecutive_timeouts = 0
                                 continue
+                            self._update_stream_health(
+                                status="degraded",
+                                message="Waiting for camera frames",
+                            )
                             frame = self.placeholder_frame
                         else:
-                            consecutive_timeouts = 0  # Reset counter on successful frame
+                            consecutive_timeouts = 0
                             frame = self.output.read_frame()
 
                 if frame is None or not isinstance(frame, bytes):
@@ -1316,7 +1482,6 @@ class CameraObject:
                     frame = self.placeholder_frame
                     continue
 
-                # Safely get camera configuration
                 try:
                     config = self.picam2.camera_configuration()
                     if config is None:
@@ -1327,26 +1492,14 @@ class CameraObject:
                     frame = self.placeholder_frame
                     continue
 
-                # Check if we need to restart the stream
-                #try:
-                #    actual_res = config["main"]["size"]
-                #    expected_res = self.video_config["main"]["size"]
-
-                #    if actual_res != expected_res:
-                #        print(f"⚠️ Resolution mismatch: {actual_res} ≠ {expected_res}")
-                #        self.safe_restart_stream()
-                #        continue
-                #except Exception as e:
-                #    print(f"⚠️ Error checking resolution: {e}")
-                #    frame = self.placeholder_frame
-                #    continue
-
-                frames_since_start += 1
-                if (not self._did_runtime_ae_enable_sync) and frames_since_start >= 8:
-                    if self._aec_should_be_enabled():
-                        out = self.apply_exposure_now()
-                        camui_log(f"Runtime AEC-AGC sync result: {out}")
-                    self._did_runtime_ae_enable_sync = True
+                if not self.use_placeholder:
+                    frames_since_start += 1
+                    if (not self._did_runtime_ae_enable_sync) and frames_since_start >= 8:
+                        if self._aec_should_be_enabled():
+                            out = self.apply_exposure_now()
+                            camui_log(f"Runtime AEC-AGC sync result: {out}")
+                        self._did_runtime_ae_enable_sync = True
+                    self._record_stream_frame_success()
 
                 frame = self.apply_frame_rotation(frame)
 
@@ -1356,7 +1509,21 @@ class CameraObject:
             except Exception as e:
                 camui_log(f"Stream loop error: {e}")
                 traceback.print_exc()
-                time.sleep(0.1)  # Prevent tight loop on error
+                with self.stream_health_lock:
+                    self.stream_health["consecutive_errors"] += 1
+                    self.stream_health["last_error"] = str(e)
+                    error_count = self.stream_health["consecutive_errors"]
+                if error_count >= STREAM_MAX_CONSECUTIVE_ERRORS:
+                    self._attempt_stream_recovery(str(e))
+                    with self.stream_health_lock:
+                        self.stream_health["consecutive_errors"] = 0
+                else:
+                    self._update_stream_health(
+                        status="degraded",
+                        message=f"Stream error: {e}",
+                        last_error=str(e),
+                    )
+                time.sleep(STREAM_ERROR_BACKOFF_SEC)
                 continue
 
     def safe_restart_stream(self):
@@ -1369,12 +1536,20 @@ class CameraObject:
             self.picam2.start(self.video_config, show_preview=False)
             self.start_streaming()
             self.flush_frames()
+            self._did_runtime_ae_enable_sync = False
             self.use_placeholder = False
             camui_log("Stream restarted and flushed.")
+            return True
         except Exception as e:
             camui_log(f"Failed to restart stream: {e}")
             traceback.print_exc()
-            self.use_placeholder = True  # Keep using placeholder if restart fails
+            self.use_placeholder = True
+            self._update_stream_health(
+                status="failed",
+                message="Stream restart failed",
+                last_error=str(e),
+            )
+            return False
 
     def generate_placeholder_frame(self):
         mode_index = int(self.camera_profile["sensor_mode"])
@@ -2343,6 +2518,14 @@ def snapshot(camera_num):
             return send_file(filepath, as_attachment=False, download_name="snapshot.jpg", mimetype='image/jpeg')
     else:
         abort(404)
+
+@app.route('/stream_status_<int:camera_num>')
+def stream_status(camera_num):
+    camera = cameras.get(camera_num)
+    if not camera:
+        return jsonify({"success": False, "error": "Camera not found"}), 404
+    health = camera.get_stream_health()
+    return jsonify({"success": True, **health})
 
 @app.route('/video_feed_<int:camera_num>')
 def video_feed(camera_num):

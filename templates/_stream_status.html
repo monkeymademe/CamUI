@@ -1,0 +1,63 @@
+<div id="streamStatusBanner" class="alert d-none mb-3" role="alert"></div>
+
+<script>
+(function () {
+  const cameraNum = {{ camera.Num }};
+  const banner = document.getElementById("streamStatusBanner");
+  if (!banner) return;
+
+  const alertClass = {
+    ok: "alert-success",
+    degraded: "alert-warning",
+    recovering: "alert-info",
+    failed: "alert-danger",
+  };
+
+  function formatHealth(data) {
+    const parts = [data.message || "Stream status unknown"];
+    if (data.live_feed_resolution) {
+      parts.push(`Feed: ${data.live_feed_resolution}`);
+    }
+    if (data.recovery_attempts > 0) {
+      parts.push(`Recoveries: ${data.recovery_attempts}`);
+    }
+    if (data.resolution_stepdowns > 0) {
+      parts.push(`Resolution lowered ${data.resolution_stepdowns} time(s)`);
+    }
+    if (data.last_error && data.status !== "ok") {
+      parts.push(`Last error: ${data.last_error}`);
+    }
+    return parts.join(" · ");
+  }
+
+  function updateStreamStatus() {
+    fetch(`/stream_status_${cameraNum}`)
+      .then((response) => response.json())
+      .then((data) => {
+        if (!data.success) return;
+
+        const status = data.status || "ok";
+        if (status === "ok") {
+          banner.className = "alert d-none mb-3";
+          banner.textContent = "";
+          return;
+        }
+
+        const cssClass = alertClass[status] || "alert-warning";
+        banner.className = `alert ${cssClass} mb-3`;
+        banner.textContent = formatHealth(data);
+
+        if (status === "recovering" || status === "failed") {
+          const videoFeed = document.getElementById("videoFeed");
+          if (videoFeed) {
+            videoFeed.src = `/video_feed_${cameraNum}?t=${Date.now()}`;
+          }
+        }
+      })
+      .catch(() => {});
+  }
+
+  updateStreamStatus();
+  setInterval(updateStreamStatus, 3000);
+})();
+</script>

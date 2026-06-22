@@ -7,6 +7,7 @@
         <div class="col-lg-8 pb-2">
             <!-- ###### Main Content ###### -->
             <h2 class="pb-2 mb-4 border-bottom">Camera: {{camera.Model}}</h2>
+            {% include "_stream_status.html" %}
             <img class="img-fluid" id="videoFeed" src="/video_feed_{{camera.Num}}">
            
                 {% include "animated_logo.html" %}

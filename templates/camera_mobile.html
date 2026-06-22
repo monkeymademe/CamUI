@@ -2,6 +2,7 @@
 
 {% block content %}
 <div class="container-fluid p-0 d-flex flex-column">
+    {% include "_stream_status.html" %}
     <!-- Video Stream -->
     <div class="flex-grow-1 d-flex justify-content-center align-items-center">
         <img id="videoFeed" src="/video_feed_{{camera.Num}}" class="img-fluid" style="max-height: 100vh; object-fit: contain;">
