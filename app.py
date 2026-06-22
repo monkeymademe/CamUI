@@ -20,6 +20,7 @@ from libcamera import Transform
 
 # Image handeling imports
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
+from PIL.ExifTags import TAGS
 
 # werkzeug imports
 from werkzeug.utils import secure_filename
@@ -309,6 +310,114 @@ def build_annotation_lines(camera, metadata=None, captured_at=None):
 
     return lines
 
+CAPTURE_METADATA_LABELS = {
+    "ExposureTime": "Exposure time",
+    "AnalogueGain": "Analogue gain",
+    "DigitalGain": "Digital gain",
+    "ColourTemperature": "Colour temperature",
+    "ColourGains": "Colour gains",
+    "LensPosition": "Lens position",
+    "AfState": "Autofocus state",
+    "AfPause": "Autofocus pause",
+    "FrameDuration": "Frame duration",
+    "SensorTimestamp": "Sensor timestamp",
+    "FocusFoM": "Focus figure of merit",
+    "ScalerCrop": "Scaler crop",
+}
+
+def capture_metadata_sidecar_path(image_path):
+    base, _ = os.path.splitext(image_path)
+    return f"{base}.meta.json"
+
+def sanitize_capture_metadata(metadata):
+    if not metadata:
+        return {}
+    sanitized = {}
+    for key, value in metadata.items():
+        try:
+            json.dumps(value)
+            sanitized[key] = value
+        except (TypeError, ValueError):
+            sanitized[key] = str(value)
+    return sanitized
+
+def save_capture_metadata_sidecar(image_path, metadata, camera_num=None, camera_model=None, captured_at=None):
+    sidecar_path = capture_metadata_sidecar_path(image_path)
+    payload = {
+        "captured_at": (captured_at or datetime.now()).isoformat(timespec="seconds"),
+        "camera_num": camera_num,
+        "camera_model": camera_model,
+        "metadata": sanitize_capture_metadata(metadata),
+    }
+    try:
+        with open(sidecar_path, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=2)
+    except OSError as e:
+        print(f"Failed to write capture metadata sidecar {sidecar_path}: {e}")
+
+def friendly_sensor_name(model_str):
+    if not model_str:
+        return None
+    text = str(model_str)
+    match = re.search(r"/(imx[a-z0-9_]+|ov[a-z0-9_]+|vd[a-z0-9_]+)@", text, re.IGNORECASE)
+    if match:
+        return match.group(1).lower()
+    if re.fullmatch(r"[a-z0-9_]+", text, re.IGNORECASE):
+        return text
+    return text
+
+def parse_camera_num_from_filename(filename):
+    match = re.match(r"pimage_camera_(\d+)_", filename)
+    if match:
+        return int(match.group(1))
+    match = re.match(r"snapshot_(\d+)", filename)
+    if match:
+        return int(match.group(1))
+    return None
+
+def format_metadata_value(key, value):
+    if value is None:
+        return "—"
+    if key == "ExposureTime":
+        if isinstance(value, (int, float)):
+            if value > 10_000:
+                return f"{value / 1_000_000:.4f} s"
+            if value < 1:
+                return f"{value:.4f} s"
+            return f"{value} s"
+    if key == "AnalogueGain" and isinstance(value, (int, float)):
+        return f"{value:.2f}"
+    if key == "ColourTemperature" and isinstance(value, (int, float)):
+        return f"{int(value)} K"
+    if isinstance(value, (list, tuple)):
+        return ", ".join(str(item) for item in value)
+    if isinstance(value, dict):
+        return json.dumps(value)
+    return str(value)
+
+def format_exif_display_value(name, value):
+    if value is None:
+        return "—"
+    if name in ("ExposureTime",):
+        try:
+            seconds = float(value)
+            if seconds < 1:
+                denom = max(1, round(1 / seconds))
+                return f"1/{denom} s ({seconds:.4f} s)"
+            return f"{seconds:.4f} s"
+        except (TypeError, ValueError):
+            return str(value)
+    if name in ("ISOSpeedRatings", "PhotographicSensitivity"):
+        return str(value)
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8", errors="replace")
+        except Exception:
+            return value.hex()
+    if isinstance(value, tuple):
+        return ", ".join(str(item) for item in value)
+    return str(value)
+
 def apply_annotations_to_file(image_path, lines):
     if not lines or not os.path.isfile(image_path):
         return
@@ -316,6 +425,7 @@ def apply_annotations_to_file(image_path, lines):
     font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
     try:
         with Image.open(image_path) as img:
+            exif_data = img.getexif()
             img = ImageOps.exif_transpose(img.convert("RGB"))
             font_size = max(16, min(42, img.width // 55))
             try:
@@ -349,7 +459,7 @@ def apply_annotations_to_file(image_path, lines):
                 draw.text((x0 + padding, y), line, font=font, fill=(255, 255, 255, 255))
                 y += line_height + line_spacing
 
-            annotated.convert("RGB").save(image_path, format="JPEG", quality=95)
+            annotated.convert("RGB").save(image_path, format="JPEG", quality=95, exif=exif_data)
     except Exception as e:
         print(f"Annotation overlay failed for {image_path}: {e}")
 
@@ -1273,9 +1383,10 @@ class CameraObject:
             return
         try:
             with Image.open(image_path) as img:
+                exif_data = img.getexif()
                 img = ImageOps.exif_transpose(img.convert("RGB"))
                 img = img.rotate(-rotation, expand=True, resample=Image.BILINEAR)
-                img.save(image_path, format="JPEG", quality=95)
+                img.save(image_path, format="JPEG", quality=95, exif=exif_data)
         except Exception as e:
             print(f"⚠️ Image rotation failed for {image_path}: {e}")
 
@@ -1854,6 +1965,13 @@ class CameraObject:
             captured_at = datetime.now()
             if frame_metadata is None:
                 frame_metadata = self.capture_metadata()
+            save_capture_metadata_sidecar(
+                image_path,
+                frame_metadata,
+                camera_num=camera_num,
+                camera_model=self.camera_info.get("Model"),
+                captured_at=captured_at,
+            )
             self.apply_capture_annotations(image_path, frame_metadata, captured_at, timelapse=True)
 
             print(f"Timelapse frame saved: {image_path}")
@@ -1886,6 +2004,13 @@ class CameraObject:
             
             self.apply_rotation_to_file(f"{filepath}.jpg")
             captured_at = datetime.now()
+            save_capture_metadata_sidecar(
+                f"{filepath}.jpg",
+                metadata,
+                camera_num=camera_num,
+                camera_model=self.camera_info.get("Model"),
+                captured_at=captured_at,
+            )
             self.apply_capture_annotations(f"{filepath}.jpg", metadata, captured_at)
 
             # Switch to still mode and capture the image
@@ -1916,6 +2041,13 @@ class CameraObject:
             self.apply_rotation_to_file(f'{filepath}.jpg')
             captured_at = datetime.now()
             frame_metadata = self.capture_metadata()
+            save_capture_metadata_sidecar(
+                f'{filepath}.jpg',
+                frame_metadata,
+                camera_num=camera_num,
+                camera_model=self.camera_info.get("Model"),
+                captured_at=captured_at,
+            )
             self.apply_capture_annotations(f'{filepath}.jpg', frame_metadata, captured_at)
             print(f"Image captured successfully. Path: {filepath}")
             return f'{filepath}.jpg'
@@ -2025,6 +2157,95 @@ class ImageGallery:
             'width': width,
             'height': height,
         }, None
+
+    def get_image_metadata_info(self, filename):
+        if not self._is_valid_gallery_file(filename) or not filename.lower().endswith(".jpg"):
+            return None
+
+        image_path = os.path.join(self.upload_folder, filename)
+        fields = []
+        has_exif = False
+        has_sidecar = False
+
+        try:
+            file_size = os.path.getsize(image_path)
+        except OSError:
+            file_size = None
+
+        dng_file = os.path.splitext(filename)[0] + ".dng"
+        has_dng = os.path.exists(os.path.join(self.upload_folder, dng_file))
+
+        fields.append({"label": "Filename", "value": filename})
+        if file_size is not None:
+            fields.append({"label": "File size", "value": f"{file_size:,} bytes"})
+
+        sidecar_path = capture_metadata_sidecar_path(image_path)
+        sidecar = None
+        if os.path.isfile(sidecar_path):
+            has_sidecar = True
+            try:
+                with open(sidecar_path, "r", encoding="utf-8") as handle:
+                    sidecar = json.load(handle)
+            except (json.JSONDecodeError, OSError) as e:
+                fields.append({"label": "Sidecar metadata", "value": f"Unreadable ({e})"})
+
+        if sidecar:
+            if sidecar.get("captured_at"):
+                fields.append({"label": "Captured", "value": sidecar["captured_at"]})
+            if sidecar.get("camera_model"):
+                fields.append({"label": "Sensor", "value": friendly_sensor_name(sidecar["camera_model"])})
+            if sidecar.get("camera_num") is not None:
+                fields.append({"label": "Camera index", "value": str(sidecar["camera_num"])})
+            for key, label in CAPTURE_METADATA_LABELS.items():
+                if key in (sidecar.get("metadata") or {}):
+                    fields.append({
+                        "label": label,
+                        "value": format_metadata_value(key, sidecar["metadata"][key]),
+                    })
+        else:
+            camera_num = parse_camera_num_from_filename(filename)
+            if camera_num is not None:
+                fields.append({"label": "Camera index", "value": str(camera_num)})
+
+        try:
+            with Image.open(image_path) as img:
+                width, height = img.size
+                fields.append({"label": "Dimensions", "value": f"{width} × {height}"})
+                exif = img.getexif()
+                exif_fields = []
+                for tag_id, value in exif.items():
+                    if tag_id == 34665:
+                        continue
+                    name = TAGS.get(tag_id, str(tag_id))
+                    exif_fields.append((name, format_exif_display_value(name, value)))
+                if exif.get(34665):
+                    for tag_id, value in exif.get_ifd(34665).items():
+                        name = TAGS.get(tag_id, str(tag_id))
+                        exif_fields.append((name, format_exif_display_value(name, value)))
+                if exif_fields:
+                    has_exif = True
+                    seen = {item["label"] for item in fields}
+                    for name, value in exif_fields:
+                        label = name.replace("ISOSpeedRatings", "ISO")
+                        if label == "Model":
+                            value = friendly_sensor_name(value) or value
+                        if label in seen:
+                            continue
+                        fields.append({"label": label, "value": value})
+                        seen.add(label)
+        except Exception as e:
+            fields.append({"label": "Image read error", "value": str(e)})
+
+        if has_dng:
+            fields.append({"label": "RAW (DNG)", "value": dng_file})
+
+        return {
+            "filename": filename,
+            "fields": fields,
+            "has_exif": has_exif,
+            "has_sidecar": has_sidecar,
+            "has_metadata": has_exif or has_sidecar,
+        }
 
     def scan_gallery_images(self):
         valid_images = []
@@ -2319,6 +2540,9 @@ class ImageGallery:
                 print(has_dng)
                 if has_dng:
                     os.remove(os.path.join(self.upload_folder, dng_file))
+                sidecar_path = capture_metadata_sidecar_path(image_path)
+                if os.path.isfile(sidecar_path):
+                    os.remove(sidecar_path)
                 return True, f"Image '{filename}' deleted successfully."
             except Exception as e:
                 print(f"Error deleting image {filename}: {e}")
@@ -2336,6 +2560,7 @@ class ImageGallery:
 
         try:
             with Image.open(image_path) as img:
+                exif_data = img.getexif()
                 img = img.convert("RGB")  # Ensure no transparency issues
 
                 # Reset EXIF rotation before applying new rotation
@@ -2368,7 +2593,7 @@ class ImageGallery:
                 else:
                     return False, "Invalid save option."
 
-                img.save(save_path)
+                img.save(save_path, exif=exif_data)
                 return True, "Image saved successfully."
 
         except Exception as e:
@@ -3261,7 +3486,19 @@ def view_image(filename):
     image_path = os.path.join(app.config['upload_folder'], safe_filename)
     if not os.path.isfile(image_path) or not is_safe_path(app.config['upload_folder'], image_path):
         abort(404)
-    return render_template('view_image.html', filename=safe_filename)
+    metadata_info = image_gallery_manager.get_image_metadata_info(safe_filename)
+    return render_template('view_image.html', filename=safe_filename, metadata_info=metadata_info)
+
+@app.route('/image_metadata/<filename>')
+def image_metadata(filename):
+    safe_filename = secure_filename(filename)
+    image_path = os.path.join(app.config['upload_folder'], safe_filename)
+    if not os.path.isfile(image_path) or not is_safe_path(app.config['upload_folder'], image_path):
+        return jsonify({"success": False, "message": "Image not found"}), 404
+    metadata_info = image_gallery_manager.get_image_metadata_info(safe_filename)
+    if not metadata_info:
+        return jsonify({"success": False, "message": "Could not read image metadata"}), 404
+    return jsonify({"success": True, **metadata_info})
 
 @app.route('/batch_delete_images', methods=['POST'])
 def batch_delete_images():

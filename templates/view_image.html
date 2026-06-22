@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 
 {% block content %}
-<div class="d-flex flex-column align-items-center justify-content-center">
+<div class="d-flex flex-column align-items-center justify-content-center pb-5 mb-5">
     <!-- Image Container -->
     <div class="d-flex justify-content-center align-items-center flex-grow-1 w-100">
         <img id="imageView" src="{{ url_for('static', filename='gallery/' + filename) }}" 
@@ -10,11 +10,54 @@
     </div>
 </div>
 
-<!-- Fixed Footer (no scrolling, no overlap) -->
-<div class="fixed-bottom bg-dark text-center p-3" style="height: 60px;">
+{% if metadata_info and metadata_info.fields %}
+<div id="metadataPanel" class="collapse fixed-bottom bg-dark text-light border-top border-secondary"
+     style="bottom: 60px; max-height: 45vh; overflow-y: auto; z-index: 1030;">
+    <div class="container py-3">
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <h6 class="mb-0">Image metadata</h6>
+            <button type="button" class="btn-close btn-close-white" data-bs-toggle="collapse"
+                data-bs-target="#metadataPanel" aria-label="Close"></button>
+        </div>
+        {% if metadata_info.has_exif and not metadata_info.has_sidecar %}
+        <p class="small text-secondary mb-2">Showing EXIF data embedded in the JPEG by Picamera2.</p>
+        {% elif metadata_info.has_sidecar %}
+        <p class="small text-secondary mb-2">Capture settings from CamUI; EXIF fields included where available.</p>
+        {% endif %}
+        <div class="table-responsive">
+            <table class="table table-sm table-dark table-borderless mb-0">
+                <tbody>
+                    {% for field in metadata_info.fields %}
+                    <tr>
+                        <th scope="row" class="text-secondary pe-3 text-nowrap">{{ field.label }}</th>
+                        <td class="text-break">{{ field.value }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+{% elif metadata_info %}
+<div id="metadataPanel" class="collapse fixed-bottom bg-dark text-light border-top border-secondary"
+     style="bottom: 60px; z-index: 1030;">
+    <div class="container py-3">
+        <p class="mb-0 small text-secondary">No EXIF or capture metadata found for this image. New captures store metadata automatically.</p>
+    </div>
+</div>
+{% endif %}
+
+<!-- Fixed Footer -->
+<div class="fixed-bottom bg-dark text-center p-3" style="height: 60px; z-index: 1040;">
     <button class="btn btn-light mx-2" onclick="toggleFullscreen()">
         <i class="bi bi-arrows-fullscreen"></i> Fullscreen
     </button>
+    {% if metadata_info %}
+    <button class="btn btn-light mx-2" data-bs-toggle="collapse" data-bs-target="#metadataPanel"
+        aria-expanded="false" aria-controls="metadataPanel">
+        <i class="bi bi-info-circle"></i> Info
+    </button>
+    {% endif %}
     <button class="btn btn-light mx-2" onclick="location.href='/image_gallery'">
         <i class="bi bi-images"></i> Gallery
     </button>
