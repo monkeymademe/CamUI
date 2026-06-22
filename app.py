@@ -19,7 +19,7 @@ from picamera2.outputs import FileOutput
 from libcamera import Transform
 
 # Image handeling imports
-from PIL import Image, ImageDraw, ImageEnhance, ImageOps
+from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
 # werkzeug imports
 from werkzeug.utils import secure_filename
@@ -129,9 +129,22 @@ minimum_last_config = {
     "cameras": []
 }
 
+DEFAULT_ANNOTATION_SETTINGS = {
+    "enabled": True,
+    "exclude_timelapse": False,
+    "groups": {
+        "timestamp": True,
+        "camera_model": True,
+        "capture_settings": False,
+        "notes": True,
+    },
+    "notes": "",
+}
+
 DEFAULT_APP_SETTINGS = {
     "software_rotation_enabled": False,
     "camera_module_info_mtime": None,
+    "annotations": DEFAULT_ANNOTATION_SETTINGS,
 }
 
 app_settings_path = os.path.join(current_dir, 'camui_settings.json')
@@ -194,16 +207,122 @@ def control_template():
         settings = json.load(f)
     return settings
 
-# Load or initialize the configuration
-camera_last_config = load_or_initialize_config(last_config_file_path, minimum_last_config)
-app_settings = load_or_initialize_config(app_settings_path, DEFAULT_APP_SETTINGS.copy())
-
 def save_app_settings():
     with open(app_settings_path, 'w') as file:
         json.dump(app_settings, file, indent=4)
 
 def is_software_rotation_enabled():
     return bool(app_settings.get("software_rotation_enabled", False))
+
+def normalize_annotation_settings(raw=None):
+    defaults = json.loads(json.dumps(DEFAULT_ANNOTATION_SETTINGS))
+    if not isinstance(raw, dict):
+        return defaults
+
+    merged = defaults.copy()
+    merged["enabled"] = bool(raw.get("enabled", defaults["enabled"]))
+    merged["exclude_timelapse"] = bool(raw.get("exclude_timelapse", defaults["exclude_timelapse"]))
+    merged["notes"] = str(raw.get("notes", defaults["notes"]))
+
+    groups = raw.get("groups") or {}
+    for key in defaults["groups"]:
+        if key in groups:
+            merged["groups"][key] = bool(groups[key])
+    if "camera_model" not in groups and "equipment" in groups:
+        merged["groups"]["camera_model"] = bool(groups["equipment"])
+
+    return merged
+
+def get_annotation_settings():
+    return normalize_annotation_settings(app_settings.get("annotations"))
+
+def build_annotation_lines(camera, metadata=None, captured_at=None):
+    settings = get_annotation_settings()
+    if not settings.get("enabled"):
+        return []
+
+    groups = settings.get("groups", {})
+    lines = []
+    captured_at = captured_at or datetime.now()
+
+    if groups.get("timestamp"):
+        lines.append(captured_at.strftime("%Y-%m-%d %H:%M:%S"))
+
+    if groups.get("camera_model") and camera is not None:
+        module_spec = camera.get_camera_module_spec()
+        if module_spec:
+            camera_model = module_spec.get("module_name", "")
+        else:
+            camera_model = camera.camera_info.get("Model", "")
+        if camera_model:
+            lines.append(camera_model)
+
+    if groups.get("capture_settings") and metadata:
+        parts = []
+        exposure_us = metadata.get("ExposureTime")
+        gain = metadata.get("AnalogueGain")
+        if exposure_us is not None:
+            parts.append(f"Exp {exposure_us / 1_000_000:.4f}s")
+        if gain is not None:
+            parts.append(f"Gain {gain:.2f}")
+        if parts:
+            lines.append(" · ".join(parts))
+
+    if groups.get("notes"):
+        notes = settings.get("notes", "").strip()
+        if notes:
+            lines.extend(line.strip() for line in notes.splitlines() if line.strip())
+
+    return lines
+
+def apply_annotations_to_file(image_path, lines):
+    if not lines or not os.path.isfile(image_path):
+        return
+
+    font_path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+    try:
+        with Image.open(image_path) as img:
+            img = ImageOps.exif_transpose(img.convert("RGB"))
+            font_size = max(16, min(42, img.width // 55))
+            try:
+                font = ImageFont.truetype(font_path, font_size)
+            except OSError:
+                font = ImageFont.load_default()
+
+            padding = max(8, font_size // 2)
+            line_spacing = max(4, font_size // 6)
+            measure = ImageDraw.Draw(img)
+
+            line_sizes = []
+            for line in lines:
+                bbox = measure.textbbox((0, 0), line, font=font)
+                line_sizes.append((bbox[2] - bbox[0], bbox[3] - bbox[1]))
+
+            block_w = max(width for width, _ in line_sizes) + padding * 2
+            block_h = sum(height for _, height in line_sizes) + line_spacing * (len(lines) - 1) + padding * 2
+            x0 = padding
+            y0 = img.height - block_h - padding
+
+            overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
+            overlay_draw = ImageDraw.Draw(overlay)
+            overlay_draw.rectangle([x0, y0, x0 + block_w, y0 + block_h], fill=(0, 0, 0, 160))
+
+            annotated = Image.alpha_composite(img.convert("RGBA"), overlay)
+            draw = ImageDraw.Draw(annotated)
+
+            y = y0 + padding
+            for line, (_, line_height) in zip(lines, line_sizes):
+                draw.text((x0 + padding, y), line, font=font, fill=(255, 255, 255, 255))
+                y += line_height + line_spacing
+
+            annotated.convert("RGB").save(image_path, format="JPEG", quality=95)
+    except Exception as e:
+        print(f"Annotation overlay failed for {image_path}: {e}")
+
+# Load or initialize the configuration
+camera_last_config = load_or_initialize_config(last_config_file_path, minimum_last_config)
+app_settings = load_or_initialize_config(app_settings_path, DEFAULT_APP_SETTINGS.copy())
+app_settings["annotations"] = normalize_annotation_settings(app_settings.get("annotations"))
 
 def save_camera_last_config(config):
     with open(last_config_file_path, 'w') as file:
@@ -889,6 +1008,13 @@ class CameraObject:
                 img.save(image_path, format="JPEG", quality=95)
         except Exception as e:
             print(f"⚠️ Image rotation failed for {image_path}: {e}")
+
+    def apply_capture_annotations(self, image_path, metadata=None, captured_at=None, timelapse=False):
+        if timelapse and get_annotation_settings().get("exclude_timelapse"):
+            return
+        lines = build_annotation_lines(self, metadata, captured_at)
+        if lines:
+            apply_annotations_to_file(image_path, lines)
     
     def set_sensor_mode(self, mode_index):
         try:
@@ -1271,19 +1397,20 @@ class CameraObject:
         """Capture one timelapse frame. Stream is normally off during timelapse."""
         image_path = f"{filepath_base}.jpg"
         try:
+            frame_metadata = None
             if capture_mode == "feed":
                 self.picam2.switch_mode_and_capture_file(self.video_config, image_path)
             elif self.camera_profile.get("saveRAW"):
-                buffers, metadata = self.picam2.switch_mode_and_capture_buffers(
+                buffers, frame_metadata = self.picam2.switch_mode_and_capture_buffers(
                     self.still_config, ["main", "raw"]
                 )
                 self.picam2.helpers.save(
                     self.picam2.helpers.make_image(buffers[0], self.still_config["main"]),
-                    metadata,
+                    frame_metadata,
                     image_path,
                 )
                 self.picam2.helpers.save_dng(
-                    buffers[1], metadata, self.still_config["raw"], f"{filepath_base}.dng"
+                    buffers[1], frame_metadata, self.still_config["raw"], f"{filepath_base}.dng"
                 )
                 self.picam2.configure(self.video_config)
             else:
@@ -1294,6 +1421,10 @@ class CameraObject:
                 raise IOError(f"Timelapse frame not written: {image_path}")
 
             self.apply_rotation_to_file(image_path)
+            captured_at = datetime.now()
+            if frame_metadata is None:
+                frame_metadata = self.capture_metadata()
+            self.apply_capture_annotations(image_path, frame_metadata, captured_at, timelapse=True)
 
             print(f"Timelapse frame saved: {image_path}")
             for hook in plugin_hooks.get("after_image_capture", []):
@@ -1324,6 +1455,8 @@ class CameraObject:
                 self.picam2.helpers.save_dng(buffers[1], metadata, self.still_config["raw"], f"{filepath}.dng")
             
             self.apply_rotation_to_file(f"{filepath}.jpg")
+            captured_at = datetime.now()
+            self.apply_capture_annotations(f"{filepath}.jpg", metadata, captured_at)
 
             # Switch to still mode and capture the image
             #self.picam2.switch_mode_and_capture_file(self.still_config, f"{filepath}.jpg")
@@ -1351,6 +1484,9 @@ class CameraObject:
             request.save("main", f'{filepath}.jpg')
             request.release()
             self.apply_rotation_to_file(f'{filepath}.jpg')
+            captured_at = datetime.now()
+            frame_metadata = self.capture_metadata()
+            self.apply_capture_annotations(f'{filepath}.jpg', frame_metadata, captured_at)
             print(f"Image captured successfully. Path: {filepath}")
             return f'{filepath}.jpg'
         except Exception as e:
@@ -1909,7 +2045,19 @@ def system_settings():
         firmware_control=firmware_control,
         camera_modules=camera_module_info.get("camera_modules", []),
         software_rotation_enabled=is_software_rotation_enabled(),
+        annotation_settings=get_annotation_settings(),
     )
+
+@app.route('/update_annotation_settings', methods=['POST'])
+def update_annotation_settings():
+    data = request.get_json(silent=True) or {}
+    try:
+        normalized = normalize_annotation_settings(data)
+        app_settings["annotations"] = normalized
+        save_app_settings()
+        return jsonify({"success": True, "annotations": normalized})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 400
 
 @app.route('/update_system_setting', methods=['POST'])
 def update_system_setting():

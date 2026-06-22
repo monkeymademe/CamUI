@@ -1,4 +1,15 @@
 {
     "software_rotation_enabled": false,
-    "camera_module_info_mtime": 1782155551.6798975
+    "camera_module_info_mtime": 1782155551.6798975,
+    "annotations": {
+        "enabled": true,
+        "exclude_timelapse": true,
+        "groups": {
+            "timestamp": true,
+            "camera_model": true,
+            "capture_settings": false,
+            "notes": true
+        },
+        "notes": "pokgwerp[gk"
+    }
 }

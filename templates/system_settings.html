@@ -42,6 +42,73 @@
     </div>
   </div>
 
+  <!-- Capture annotations -->
+  <div class="mb-5">
+    <h2 class="pb-2 mb-4 border-bottom">Capture Annotations</h2>
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <p class="text-muted">
+          Burn annotations when saving images.
+        </p>
+        <div class="form-check form-switch mb-4">
+          <input class="form-check-input" type="checkbox" role="switch" id="annotationsEnabledToggle"
+            {% if annotation_settings.enabled %}checked{% endif %}>
+          <label class="form-check-label" for="annotationsEnabledToggle">
+            Enable capture annotations
+          </label>
+        </div>
+        <div class="form-check form-switch mb-4">
+          <input class="form-check-input" type="checkbox" role="switch" id="excludeTimelapseToggle"
+            {% if annotation_settings.exclude_timelapse %}checked{% endif %}>
+          <label class="form-check-label" for="excludeTimelapseToggle">
+            Exclude timelapse images
+          </label>
+        </div>
+
+        <h6 class="mb-3">Annotation groups</h6>
+        <div class="row g-3 mb-4">
+          <div class="col-md-6">
+            <div class="form-check form-switch">
+              <input class="form-check-input annotation-group" type="checkbox" id="groupTimestamp"
+                data-group="timestamp" {% if annotation_settings.groups.timestamp %}checked{% endif %}>
+              <label class="form-check-label" for="groupTimestamp">Date &amp; time</label>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="form-check form-switch">
+              <input class="form-check-input annotation-group" type="checkbox" id="groupCameraModel"
+                data-group="camera_model" {% if annotation_settings.groups.camera_model %}checked{% endif %}>
+              <label class="form-check-label" for="groupCameraModel">Show camera model</label>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="form-check form-switch">
+              <input class="form-check-input annotation-group" type="checkbox" id="groupCaptureSettings"
+                data-group="capture_settings" {% if annotation_settings.groups.capture_settings %}checked{% endif %}>
+              <label class="form-check-label" for="groupCaptureSettings">Exposure &amp; gain</label>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="form-check form-switch">
+              <input class="form-check-input annotation-group" type="checkbox" id="groupNotes"
+                data-group="notes" {% if annotation_settings.groups.notes %}checked{% endif %}>
+              <label class="form-check-label" for="groupNotes">Custom notes</label>
+            </div>
+          </div>
+        </div>
+
+        <div class="mb-4">
+          <label for="annotationNotes" class="form-label">Custom notes</label>
+          <textarea class="form-control" id="annotationNotes" rows="3"
+            placeholder="Optional text to burn onto each capture">{{ annotation_settings.notes }}</textarea>
+        </div>
+
+        <button type="button" class="btn btn-primary" id="saveAnnotationsButton">Save annotation settings</button>
+        <div id="annotationsAlert" class="alert mt-3 mb-0 d-none" role="alert"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- Camera cache -->
   <div class="mb-5">
     <h2 class="pb-2 mb-4 border-bottom">Camera Cache</h2>
@@ -169,6 +236,50 @@
       showSoftwareRotationAlert('danger', 'Request failed: ' + error);
     });
   }
+
+  function showAnnotationsAlert(type, message) {
+    const alert = document.getElementById("annotationsAlert");
+    alert.className = `alert alert-${type} mt-3 mb-0`;
+    alert.textContent = message;
+    alert.classList.remove("d-none");
+  }
+
+  function collectAnnotationSettings() {
+    const groups = {};
+    document.querySelectorAll(".annotation-group").forEach((input) => {
+      groups[input.dataset.group] = input.checked;
+    });
+    return {
+      enabled: document.getElementById("annotationsEnabledToggle").checked,
+      exclude_timelapse: document.getElementById("excludeTimelapseToggle").checked,
+      groups,
+      notes: document.getElementById("annotationNotes").value,
+    };
+  }
+
+  document.getElementById("saveAnnotationsButton").addEventListener("click", function () {
+    const saveButton = this;
+    saveButton.disabled = true;
+
+    fetch("/update_annotation_settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(collectAnnotationSettings()),
+    })
+      .then((response) => response.json())
+      .then((data) => {
+        if (!data.success) {
+          throw new Error(data.error || "Failed to save annotation settings");
+        }
+        showAnnotationsAlert("success", "Annotation settings saved.");
+      })
+      .catch((error) => {
+        showAnnotationsAlert("danger", error.message || "Request failed");
+      })
+      .finally(() => {
+        saveButton.disabled = false;
+      });
+  });
 
   function showClearCacheAlert(type, message) {
     const alert = document.getElementById("clearCacheAlert");
