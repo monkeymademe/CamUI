@@ -1,0 +1,170 @@
+{% extends 'base.html' %}
+
+{% block content %}
+
+<div class="container-xxl">
+    <div class="row">
+        <div>
+            <!-- Delete Confirmation Modal -->
+            <div class="modal fade" id="deleteTimelapseModal" tabindex="-1" role="dialog" aria-labelledby="deleteTimelapseModalLabel" aria-hidden="true">
+                <div class="modal-dialog" role="document">
+                    <div class="modal-content">
+                        <div class="modal-header">
+                            <h5 class="modal-title" id="deleteTimelapseModalLabel">Confirm Deletion</h5>
+                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                        </div>
+                        <div class="modal-body">
+                            Delete timelapse <strong id="deleteTimelapseName"></strong> and all its frames? This cannot be undone.
+                        </div>
+                        <div class="modal-footer">
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                            <button type="button" class="btn btn-danger" id="confirmDeleteTimelapseButton">Delete</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="container">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <div class="btn-group" role="group" aria-label="Gallery type">
+                        <a href="{{ url_for('image_gallery') }}" class="btn btn-outline-primary">Still Images</a>
+                        <a href="{{ url_for('timelapse_gallery') }}" class="btn btn-primary">Timelapses</a>
+                    </div>
+                </div>
+
+                {% if empty_gallery %}
+                <div class="alert alert-secondary text-center" role="alert">
+                    <h5 class="alert-heading">No timelapse sessions yet</h5>
+                    <p class="mb-0">Start a timelapse from a camera to capture frames here.</p>
+                </div>
+                {% endif %}
+
+                <div class="row row-cols-1 row-cols-sm-2 row-cols-md-3 g-3" id="timelapse-gallery">
+                    {% for session in sessions %}
+                    <div class="col" id="card_{{ session['session_id'] }}">
+                        <div class="card shadow-sm position-relative">
+                            <a href="{{ url_for('timelapse_session_gallery', session_id=session['session_id']) }}" class="text-decoration-none text-body">
+                                {% if session['preview_frame'] %}
+                                <img src="{{ url_for('static', filename='gallery/timelapses/' + session['session_id'] + '/' + session['preview_frame']) }}"
+                                     alt="{{ session['session_name'] }}" class="bd-placeholder-img card-img-top" width="100%">
+                                {% else %}
+                                <div class="bd-placeholder-img card-img-top bg-secondary text-white d-flex align-items-center justify-content-center" style="height: 200px;">
+                                    <i class="bi bi-camera-reels fs-1"></i>
+                                </div>
+                                {% endif %}
+                                {% if session['status'] == 'running' %}
+                                <span class="badge rounded-pill text-bg-success position-absolute top-0 end-0 m-2">Recording</span>
+                                {% elif session['status'] == 'completed' %}
+                                <span class="badge rounded-pill text-bg-primary position-absolute top-0 end-0 m-2">Completed</span>
+                                {% elif session['status'] == 'stopped' %}
+                                <span class="badge rounded-pill text-bg-warning position-absolute top-0 end-0 m-2">Stopped</span>
+                                {% endif %}
+                            </a>
+                            <div class="card-body">
+                                <h6 class="card-title mb-1">{{ session['session_name'] }}</h6>
+                                <p class="card-text small text-muted mb-2">{{ session['session_id'] }}</p>
+                                <p class="card-text">
+                                    Started: {{ session['started_at'] }}<br>
+                                    Camera: {{ session['camera_num'] if session['camera_num'] is not none else '—' }}<br>
+                                    Frames: {{ session['frame_count'] }}
+                                    {% if session['interval_seconds'] %}<br>Interval: {{ session['interval_seconds'] }}s{% endif %}
+                                    {% if session['width'] and session['height'] %}<br>Resolution: {{ session['width'] }}x{{ session['height'] }}{% endif %}
+                                </p>
+                                <div class="d-flex justify-content-between align-items-center gap-2">
+                                    <a href="{{ url_for('timelapse_session_gallery', session_id=session['session_id']) }}" class="btn btn-sm btn-outline-primary">
+                                        View session
+                                    </a>
+                                    {% if session['can_delete'] %}
+                                    <button type="button" class="btn btn-sm btn-outline-danger"
+                                            onclick="openDeleteTimelapseModal({{ session['session_id']|tojson }}, {{ session['session_name']|tojson }})"
+                                            data-bs-toggle="tooltip" data-bs-title="Delete timelapse">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                    {% else %}
+                                    <button type="button" class="btn btn-sm btn-outline-danger" disabled
+                                            data-bs-toggle="tooltip" data-bs-title="Stop the timelapse before deleting">
+                                        <i class="bi bi-trash"></i>
+                                    </button>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% if not empty_gallery and total_pages > 1 %}
+<footer class="bg-dark text-center py-2 fixed-bottom">
+    <div class="d-flex justify-content-around">
+        <nav class="mt-3" aria-label="Page navigation">
+            <ul class="pagination justify-content-center">
+                <li class="page-item {% if page == 1 %}disabled{% endif %}">
+                    {% if page == 1 %}
+                    <span class="page-link">Previous</span>
+                    {% else %}
+                    <a class="page-link" href="{{ url_for('timelapse_gallery', page=page-1) }}">Previous</a>
+                    {% endif %}
+                </li>
+
+                {% for i in range(start_page, end_page + 1) %}
+                <li class="page-item {% if i == page %}active{% endif %}">
+                    <a class="page-link" href="{{ url_for('timelapse_gallery', page=i) }}">{{ i }}</a>
+                </li>
+                {% endfor %}
+
+                <li class="page-item {% if page == total_pages %}disabled{% endif %}">
+                    {% if page == total_pages %}
+                    <span class="page-link">Next</span>
+                    {% else %}
+                    <a class="page-link" href="{{ url_for('timelapse_gallery', page=page+1) }}">Next</a>
+                    {% endif %}
+                </li>
+            </ul>
+        </nav>
+    </div>
+</footer>
+{% endif %}
+
+<script>
+    function openDeleteTimelapseModal(sessionId, sessionName) {
+        const modal = new bootstrap.Modal(document.getElementById('deleteTimelapseModal'));
+        document.getElementById('deleteTimelapseName').textContent = sessionName;
+        document.getElementById('confirmDeleteTimelapseButton').setAttribute('data-session-id', sessionId);
+        modal.show();
+    }
+
+    document.getElementById('confirmDeleteTimelapseButton').addEventListener('click', function () {
+        const sessionId = this.getAttribute('data-session-id');
+        const confirmButton = this;
+
+        fetch(`/delete_timelapse/${encodeURIComponent(sessionId)}`, { method: 'DELETE' })
+            .then(response => response.json().then(data => ({ ok: response.ok, data })))
+            .then(({ ok, data }) => {
+                if (!ok) throw new Error(data.message || 'Delete failed');
+
+                const card = document.getElementById(`card_${sessionId}`);
+                if (card) card.remove();
+
+                const gallery = document.getElementById('timelapse-gallery');
+                if (!gallery.children.length) {
+                    window.location.reload();
+                }
+
+                const modalElement = document.getElementById('deleteTimelapseModal');
+                const modalInstance = bootstrap.Modal.getInstance(modalElement);
+                if (modalInstance) {
+                    modalInstance.hide();
+                    confirmButton.blur();
+                }
+            })
+            .catch(error => {
+                alert(error.message || 'Failed to delete timelapse');
+            });
+    });
+</script>
+
+{% endblock %}

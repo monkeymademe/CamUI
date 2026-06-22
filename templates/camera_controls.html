@@ -1,4 +1,5 @@
 {# camera control settings #}
+{% if not embed_panel %}
 <h2 class="pb-2 mb-4 border-bottom">Camera Settings</h2>
 
 <div class="container text-center mt-4">
@@ -22,6 +23,9 @@
         </div>
     </div>
 </div>
+{% else %}
+<h2 class="h5 pb-2 mb-3 border-bottom">Camera settings</h2>
+{% endif %}
     <!-- Hiding the toggle live preview for now as I am thinking its not needed but I don't want to kill it totally just yet
     
     <div class="form-check form-switch">
@@ -689,21 +693,23 @@ document.addEventListener("DOMContentLoaded", function () {
     const videoToggle = document.getElementById("videoFeedToggle");
     const videoFeed = document.getElementById("videoFeed");
 
-    videoToggle.addEventListener("change", function () {
+    if (videoToggle && videoFeed) {
+        videoToggle.addEventListener("change", function () {
 
-        if (this.checked) {
-            videoFeed.src = `/video_feed_${camera_num}`; // Set the correct video stream URL
-        } else {
-            videoFeed.src = "/static/placeholder.jpg"; // Show placeholder when off
-        }
+            if (this.checked) {
+                videoFeed.src = `/video_feed_${camera_num}`; // Set the correct video stream URL
+            } else {
+                videoFeed.src = "/static/placeholder.jpg"; // Show placeholder when off
+            }
 
-        // Send toggle state and camera number to Flask backend
-        fetch("/toggle_video_feed", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ enable: this.checked, camera_num: camera_num })
+            // Send toggle state and camera number to Flask backend
+            fetch("/toggle_video_feed", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ enable: this.checked, camera_num: camera_num })
+            });
         });
-    });
+    }
 });
 
 // Function to fetch and update the profile list

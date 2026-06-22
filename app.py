@@ -1,5 +1,5 @@
 # System level imports
-import os, io, json, time, tempfile, traceback
+import os, io, json, time, tempfile, traceback, re, shutil
 from datetime import datetime
 from threading import Condition
 import threading, subprocess
@@ -23,6 +23,8 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageOps
 
 # werkzeug imports
 from werkzeug.utils import secure_filename
+
+from timelapse import TimelapseManager
 
 # Plugin hooks registry
 global plugin_hooks
@@ -113,6 +115,8 @@ app.config['camera_profile_folder'] = camera_profile_folder
 # Set and ensure the image gallery directory
 upload_folder = ensure_directory(os.path.join(current_dir, 'static/gallery'))
 app.config['upload_folder'] = upload_folder
+timelapse_root = ensure_directory(os.path.join(upload_folder, 'timelapses'))
+timelapse_manager = TimelapseManager()
 
 # For the image gallery set items per page
 items_per_page = 12
@@ -223,6 +227,7 @@ class CameraObject:
         self.camera_resolutions = self.generate_camera_resolutions()
         # Ready buffer for feed
         self.output = None
+        self.capture_lock = threading.Lock()
         # Initialize configs as empty dictionaries for the still and video configs
         self.init_configure_camera()
         # Compare camera controls DB flushing out settings not avaialbe from picamera2
@@ -636,6 +641,21 @@ class CameraObject:
                 print("✅ All profile controls applied successfully")
             except Exception as e:
                 print(f"⚠️ Error applying profile controls: {e}")
+
+    def apply_controls_to_hardware(self):
+        """Push profile controls to the camera without UI side effects."""
+        controls_map = self.camera_profile.get("controls") or {}
+        if not controls_map:
+            return
+        ordered_keys = list(controls_map.keys())
+        if "AeEnable" in ordered_keys:
+            ordered_keys.remove("AeEnable")
+            ordered_keys.insert(0, "AeEnable")
+        for setting_id in ordered_keys:
+            self.picam2.set_controls({setting_id: controls_map[setting_id]})
+        for key in ("ExposureTime", "AnalogueGain"):
+            if key in controls_map:
+                self.picam2.set_controls({key: controls_map[key]})
     
     def set_orientation(self):
         # Get current transform settings
@@ -1041,6 +1061,48 @@ class CameraObject:
     # Camera Capture Functions
     #-----
 
+    def capture_timelapse_frame(self, camera_num, filepath_base, capture_mode="full", keep_stream=False):
+        """Capture one timelapse frame. Stream is normally off during timelapse."""
+        image_path = f"{filepath_base}.jpg"
+        try:
+            if capture_mode == "feed":
+                self.picam2.switch_mode_and_capture_file(self.video_config, image_path)
+            elif self.camera_profile.get("saveRAW"):
+                buffers, metadata = self.picam2.switch_mode_and_capture_buffers(
+                    self.still_config, ["main", "raw"]
+                )
+                self.picam2.helpers.save(
+                    self.picam2.helpers.make_image(buffers[0], self.still_config["main"]),
+                    metadata,
+                    image_path,
+                )
+                self.picam2.helpers.save_dng(
+                    buffers[1], metadata, self.still_config["raw"], f"{filepath_base}.dng"
+                )
+                self.picam2.configure(self.video_config)
+            else:
+                self.picam2.switch_mode_and_capture_file(self.still_config, image_path)
+                self.picam2.configure(self.video_config)
+
+            if not os.path.isfile(image_path):
+                raise IOError(f"Timelapse frame not written: {image_path}")
+
+            print(f"Timelapse frame saved: {image_path}")
+            for hook in plugin_hooks.get("after_image_capture", []):
+                try:
+                    hook(camera_num, image_path)
+                except Exception as e:
+                    print(f"Error in after_image_capture hook: {e}")
+            return image_path
+        except Exception as e:
+            print(f"Timelapse capture error: {e}")
+            traceback.print_exc()
+            try:
+                self.picam2.configure(self.video_config)
+            except Exception:
+                pass
+            return None
+
     def take_still(self, camera_num, image_name):
         try:
             self.use_placeholder = True  # Start sending placeholder frames
@@ -1123,8 +1185,12 @@ class GPIO:
 ####################
 
 class ImageGallery:
+    TIMELAPSE_SESSION_PATTERN = re.compile(r'^tl_cam\d+_.+$')
+    TIMELAPSE_FRAME_PATTERN = re.compile(r'^frame_\d+\.jpg$')
+
     def __init__(self, upload_folder, items_per_page=10):
         self.upload_folder = upload_folder
+        self.timelapse_root = os.path.join(upload_folder, 'timelapses')
         self.items_per_page = items_per_page
         self.items_per_page = 12
 
@@ -1186,7 +1252,151 @@ class ImageGallery:
         paginated_images = all_images[start_index:end_index]
 
         return paginated_images, total_pages
-    
+
+    def _valid_timelapse_session_dir(self, session_id):
+        if not session_id or not self.TIMELAPSE_SESSION_PATTERN.match(session_id):
+            return None
+        session_dir = os.path.join(self.timelapse_root, session_id)
+        if not is_safe_path(self.timelapse_root, session_dir) or not os.path.isdir(session_dir):
+            return None
+        return session_dir
+
+    def _load_timelapse_session_meta(self, session_dir, session_id):
+        meta = {"session_id": session_id}
+        session_json = os.path.join(session_dir, "session.json")
+        if os.path.isfile(session_json):
+            try:
+                with open(session_json, encoding="utf-8") as f:
+                    meta.update(json.load(f))
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"Error reading {session_json}: {e}")
+        return meta
+
+    def _format_unix_timestamp(self, unix_ts):
+        if not unix_ts:
+            return "Unknown"
+        try:
+            return datetime.utcfromtimestamp(float(unix_ts)).strftime('%Y-%m-%d %H:%M:%S')
+        except (TypeError, ValueError, OSError):
+            return "Unknown"
+
+    def list_timelapse_sessions(self):
+        if not os.path.isdir(self.timelapse_root):
+            return []
+
+        sessions = []
+        for entry in os.listdir(self.timelapse_root):
+            session_dir = self._valid_timelapse_session_dir(entry)
+            if not session_dir:
+                continue
+
+            meta = self._load_timelapse_session_meta(session_dir, entry)
+            frames = sorted(
+                f for f in os.listdir(session_dir)
+                if self.TIMELAPSE_FRAME_PATTERN.match(f)
+            )
+            settings = meta.get("settings") or {}
+            preview_frame = frames[-1] if frames else None
+            frame_count = meta.get("frame_count", len(frames))
+            if frame_count < len(frames):
+                frame_count = len(frames)
+
+            width = height = None
+            if preview_frame:
+                try:
+                    with Image.open(os.path.join(session_dir, preview_frame)) as img:
+                        width, height = img.size
+                except OSError as e:
+                    print(f"Error reading preview for {entry}: {e}")
+
+            sessions.append({
+                "session_id": entry,
+                "session_name": settings.get("session_name") or entry,
+                "camera_num": meta.get("camera_num"),
+                "status": meta.get("status", "unknown"),
+                "frame_count": frame_count,
+                "preview_frame": preview_frame,
+                "started_at": self._format_unix_timestamp(meta.get("started_at")),
+                "interval_seconds": settings.get("interval_seconds"),
+                "capture_mode": settings.get("capture_mode"),
+                "width": width,
+                "height": height,
+            })
+
+        sessions.sort(key=lambda x: x.get("started_at", ""), reverse=True)
+        return sessions
+
+    def get_timelapse_session_frames(self, session_id):
+        session_dir = self._valid_timelapse_session_dir(session_id)
+        if not session_dir:
+            return None, []
+
+        meta = self._load_timelapse_session_meta(session_dir, session_id)
+        settings = meta.get("settings") or {}
+        session_info = {
+            "session_id": session_id,
+            "session_name": settings.get("session_name") or session_id,
+            "camera_num": meta.get("camera_num"),
+            "status": meta.get("status", "unknown"),
+            "frame_count": meta.get("frame_count", 0),
+            "started_at": self._format_unix_timestamp(meta.get("started_at")),
+            "interval_seconds": settings.get("interval_seconds"),
+            "capture_mode": settings.get("capture_mode"),
+        }
+
+        frames = []
+        for frame_file in sorted(os.listdir(session_dir)):
+            if not self.TIMELAPSE_FRAME_PATTERN.match(frame_file):
+                continue
+            frame_path = os.path.join(session_dir, frame_file)
+            try:
+                with Image.open(frame_path) as img:
+                    width, height = img.size
+            except OSError:
+                width = height = None
+            frame_num = int(frame_file.split("_")[1].split(".")[0])
+            frames.append({
+                "filename": frame_file,
+                "frame_number": frame_num,
+                "width": width,
+                "height": height,
+            })
+
+        session_info["frame_count"] = max(session_info["frame_count"], len(frames))
+        return session_info, frames
+
+    def get_timelapse_session_summary(self, session_id):
+        session_info, frames = self.get_timelapse_session_frames(session_id)
+        if session_info is None:
+            return None, None, None
+        if not frames:
+            return session_info, None, None
+        return session_info, frames[0], frames[-1]
+
+    def paginate_timelapse_frames(self, session_id, page):
+        session_info, all_frames = self.get_timelapse_session_frames(session_id)
+        if session_info is None:
+            return None, [], 1
+
+        total_pages = max((len(all_frames) + self.items_per_page - 1) // self.items_per_page, 1)
+        if page > total_pages:
+            page = total_pages
+
+        start_index = (page - 1) * self.items_per_page
+        end_index = start_index + self.items_per_page
+        return session_info, all_frames[start_index:end_index], total_pages
+
+    def delete_timelapse_session(self, session_id):
+        session_dir = self._valid_timelapse_session_dir(session_id)
+        if not session_dir:
+            return False, "Timelapse session not found"
+        try:
+            shutil.rmtree(session_dir)
+            print(f"Deleted timelapse session: {session_id}")
+            return True, f"Timelapse '{session_id}' deleted successfully."
+        except Exception as e:
+            print(f"Error deleting timelapse {session_id}: {e}")
+            return False, "Failed to delete timelapse session"
 
     def find_last_image_taken(self):
         """Find the most recent image taken."""
@@ -1372,6 +1582,79 @@ def set_theme(theme):
 def home():
     camera_list = [(camera.camera_info, get_camera_info(camera.camera_info['Model'], camera_module_info)) for key, camera in cameras.items()]
     return render_template('home.html', active_page='home')
+
+@app.route("/timelapse_<int:camera_num>")
+def timelapse(camera_num):
+    camera = cameras.get(camera_num)
+    if not camera:
+        return render_template("camera_not_found.html", camera_num=camera_num), 404
+    return render_template(
+        "timelapse.html",
+        camera=camera.camera_info,
+        camera_module=camera.camera_module_spec,
+        settings=camera.live_controls,
+        sensor_modes=camera.sensor_modes,
+        active_mode_index=camera.get_sensor_mode(),
+        profiles=list_profiles(),
+        mode="timelapse",
+        active_page="timelapse",
+    )
+
+@app.route("/timelapse/start", methods=["POST"])
+def timelapse_start():
+    data = request.get_json(silent=True) or {}
+    camera_num = data.get("camera_num")
+    if camera_num is None:
+        return jsonify(success=False, error="camera_num is required"), 400
+
+    camera = cameras.get(int(camera_num))
+    if not camera:
+        return jsonify(success=False, error="Camera not found"), 404
+
+    if timelapse_manager.is_running(int(camera_num)):
+        return jsonify(success=False, error="Timelapse already running on this camera"), 409
+
+    try:
+        interval = int(data.get("interval_seconds", 10))
+        if interval < 1:
+            raise ValueError("Interval must be at least 1 second")
+
+        settings = {
+            "interval_seconds": interval,
+            "capture_mode": data.get("capture_mode", "full"),
+            "max_frames": int(data.get("max_frames", 0) or 0),
+            "session_name": (data.get("session_name") or "").strip(),
+            "freeze_settings": bool(data.get("freeze_settings", True)),
+        }
+        if settings["capture_mode"] not in ("full", "feed"):
+            raise ValueError("capture_mode must be 'full' or 'feed'")
+
+        session = timelapse_manager.start(camera, settings, timelapse_root)
+        return jsonify(success=True, session=session.to_dict())
+    except (TypeError, ValueError) as e:
+        return jsonify(success=False, error=str(e)), 400
+
+
+@app.route("/timelapse/stop", methods=["POST"])
+def timelapse_stop():
+    data = request.get_json(silent=True) or {}
+    camera_num = data.get("camera_num")
+    if camera_num is None:
+        return jsonify(success=False, error="camera_num is required"), 400
+
+    try:
+        session = timelapse_manager.stop(int(camera_num))
+        return jsonify(success=True, session=session.to_dict())
+    except ValueError as e:
+        return jsonify(success=False, error=str(e)), 404
+
+
+@app.route("/timelapse/status/<int:camera_num>")
+def timelapse_status(camera_num):
+    session = timelapse_manager.get_session(camera_num)
+    if not session:
+        return jsonify(success=True, running=False, session=None)
+    return jsonify(success=True, running=session.status in ("running", "stopping"), session=session.to_dict())
 
 @app.route('/camera_info_<int:camera_num>')
 def camera_info(camera_num):
@@ -1572,6 +1855,9 @@ def capture_still(camera_num):
             print(f"❌ Camera {camera_num} not found.")
             return jsonify(success=False, message="Camera not found"), 404
 
+        if timelapse_manager.is_running(camera_num):
+            return jsonify(success=False, message="Timelapse is running — stop it before capturing manually"), 409
+
         # Rate limit: Prevent captures happening too quickly (2 seconds per camera)
         current_time = time.time()
         #if camera_num in last_capture_time and (current_time - last_capture_time[camera_num]) < 2:
@@ -1664,6 +1950,8 @@ def update_setting():
         new_value = data.get("value")
         # Debugging: Print the received values
         print(f"Received update for Camera {camera_num}: {setting_id} -> {new_value}")
+        if timelapse_manager.is_running(int(camera_num)):
+            return jsonify({"error": "Cannot change settings while timelapse is running"}), 409
         camera = cameras.get(camera_num)
         camera.update_settings(setting_id, new_value)
         # ✅ At this stage, we're just verifying the data. No changes to the camera yet.
@@ -1790,13 +2078,41 @@ def gpio_setup():
 # Initialize the gallery with the upload folder
 image_gallery_manager = ImageGallery(upload_folder)
 
+def is_timelapse_session_active(session_id):
+    for camera_num in cameras:
+        session = timelapse_manager.get_session(camera_num)
+        if (
+            session
+            and session.session_id == session_id
+            and timelapse_manager.is_running(camera_num)
+        ):
+            return True
+    return False
+
+def annotate_timelapse_sessions(sessions):
+    for session in sessions:
+        session["can_delete"] = not is_timelapse_session_active(session["session_id"])
+    return sessions
+
 @app.route('/image_gallery')
 def image_gallery():
     page = request.args.get('page', 1, type=int)
     images, total_pages = image_gallery_manager.paginate_images(page)
     cameras_data = [(camera_num, camera) for camera_num, camera in cameras.items()]
+    timelapse_count = len(image_gallery_manager.list_timelapse_sessions())
     if not images:
-        return render_template('no_files.html')
+        return render_template(
+            'image_gallery.html',
+            image_files=[],
+            page=1,
+            total_pages=1,
+            start_page=1,
+            end_page=1,
+            cameras_data=cameras_data,
+            active_page='image_gallery',
+            timelapse_count=timelapse_count,
+            empty_gallery=True,
+        )
     # Define pagination bounds
     start_page = max(1, page - 2)  # Show previous 2 pages
     end_page = min(total_pages, page + 2)  # Show next 2 pages
@@ -1808,7 +2124,9 @@ def image_gallery():
         start_page=start_page,
         end_page=end_page,
         cameras_data=cameras_data,
-        active_page='image_gallery'
+        active_page='image_gallery',
+        timelapse_count=timelapse_count,
+        empty_gallery=False,
     )
 
 @app.route('/get_image_for_page')
@@ -1830,6 +2148,105 @@ def get_image_for_page():
         'end_page': end_page
     }
     return jsonify(response)
+
+@app.route('/timelapse_gallery')
+def timelapse_gallery():
+    page = request.args.get('page', 1, type=int)
+    sessions = annotate_timelapse_sessions(image_gallery_manager.list_timelapse_sessions())
+    cameras_data = [(camera_num, camera) for camera_num, camera in cameras.items()]
+    items_per_page = image_gallery_manager.items_per_page
+    total_pages = max((len(sessions) + items_per_page - 1) // items_per_page, 1)
+    if page > total_pages:
+        page = total_pages
+    start_index = (page - 1) * items_per_page
+    end_index = start_index + items_per_page
+    paginated_sessions = sessions[start_index:end_index]
+    start_page = max(1, page - 2)
+    end_page = min(total_pages, page + 2)
+    return render_template(
+        'timelapse_gallery.html',
+        sessions=paginated_sessions,
+        page=page,
+        total_pages=total_pages,
+        start_page=start_page,
+        end_page=end_page,
+        cameras_data=cameras_data,
+        active_page='image_gallery',
+        empty_gallery=len(sessions) == 0,
+    )
+
+@app.route('/timelapse_gallery/<session_id>')
+def timelapse_session_gallery(session_id):
+    safe_session_id = secure_filename(session_id)
+    session_info, first_frame, last_frame = image_gallery_manager.get_timelapse_session_summary(safe_session_id)
+    cameras_data = [(camera_num, camera) for camera_num, camera in cameras.items()]
+    if session_info is None:
+        abort(404)
+    session_info["can_delete"] = not is_timelapse_session_active(safe_session_id)
+    return render_template(
+        'timelapse_session.html',
+        session=session_info,
+        first_frame=first_frame,
+        last_frame=last_frame,
+        cameras_data=cameras_data,
+        active_page='image_gallery',
+    )
+
+@app.route('/timelapse_gallery/<session_id>/frames')
+def timelapse_session_frames(session_id):
+    safe_session_id = secure_filename(session_id)
+    page = request.args.get('page', 1, type=int)
+    session_info, frames, total_pages = image_gallery_manager.paginate_timelapse_frames(safe_session_id, page)
+    cameras_data = [(camera_num, camera) for camera_num, camera in cameras.items()]
+    if session_info is None:
+        abort(404)
+    session_info["can_delete"] = not is_timelapse_session_active(safe_session_id)
+    start_page = max(1, page - 2)
+    end_page = min(total_pages, page + 2)
+    return render_template(
+        'timelapse_session_frames.html',
+        session=session_info,
+        frames=frames,
+        page=page,
+        total_pages=total_pages,
+        start_page=start_page,
+        end_page=end_page,
+        cameras_data=cameras_data,
+        active_page='image_gallery',
+    )
+
+@app.route('/view_timelapse/<session_id>/<filename>')
+def view_timelapse_frame(session_id, filename):
+    safe_session_id = secure_filename(session_id)
+    safe_filename = secure_filename(filename)
+    session_dir = image_gallery_manager._valid_timelapse_session_dir(safe_session_id)
+    if not session_dir:
+        abort(404)
+    if not image_gallery_manager.TIMELAPSE_FRAME_PATTERN.match(safe_filename):
+        abort(404)
+    frame_path = os.path.join(session_dir, safe_filename)
+    if not os.path.isfile(frame_path) or not is_safe_path(session_dir, frame_path):
+        abort(404)
+    return render_template(
+        'view_timelapse_frame.html',
+        session_id=safe_session_id,
+        filename=safe_filename,
+        session_name=image_gallery_manager._load_timelapse_session_meta(session_dir, safe_session_id)
+            .get("settings", {}).get("session_name") or safe_session_id,
+    )
+
+@app.route('/delete_timelapse/<session_id>', methods=['DELETE'])
+def delete_timelapse(session_id):
+    safe_session_id = secure_filename(session_id)
+    if is_timelapse_session_active(safe_session_id):
+        return jsonify({
+            "success": False,
+            "message": "Cannot delete while timelapse is recording. Stop it first.",
+        }), 409
+    success, message = image_gallery_manager.delete_timelapse_session(safe_session_id)
+    if success:
+        return jsonify({"success": True, "message": message}), 200
+    return jsonify({"success": False, "message": message}), 404
     
 @app.route('/view_image/<filename>')
 def view_image(filename):

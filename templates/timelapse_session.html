@@ -1,0 +1,114 @@
+{% extends 'base.html' %}
+
+{% block content %}
+
+<div class="container-xxl">
+    <div class="row">
+        <div>
+            {% include '_timelapse_session_delete.html' %}
+
+            <div class="container">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
+                    <div class="btn-group" role="group" aria-label="Gallery type">
+                        <a href="{{ url_for('image_gallery') }}" class="btn btn-outline-primary">Still Images</a>
+                        <a href="{{ url_for('timelapse_gallery') }}" class="btn btn-primary">Timelapses</a>
+                    </div>
+                    <a href="{{ url_for('timelapse_gallery') }}" class="btn btn-sm btn-outline-secondary">
+                        <i class="bi bi-arrow-left"></i> All timelapses
+                    </a>
+                </div>
+
+                <div class="mb-4 d-flex justify-content-between align-items-start flex-wrap gap-2">
+                    <div>
+                        <h4 class="mb-1">{{ session['session_name'] }}</h4>
+                        <p class="text-muted mb-0">
+                            Started {{ session['started_at'] }}
+                            · Camera {{ session['camera_num'] if session['camera_num'] is not none else '—' }}
+                            · {{ session['frame_count'] }} frame{{ 's' if session['frame_count'] != 1 else '' }}
+                            {% if session['interval_seconds'] %} · {{ session['interval_seconds'] }}s interval{% endif %}
+                            {% if session['status'] == 'running' %}
+                            · <span class="badge text-bg-success">Recording</span>
+                            {% endif %}
+                        </p>
+                    </div>
+                    {% if session['can_delete'] %}
+                    <button type="button" class="btn btn-outline-danger btn-sm"
+                            onclick="openDeleteTimelapseModal({{ session['session_id']|tojson }}, {{ session['session_name']|tojson }})">
+                        <i class="bi bi-trash"></i> Delete session
+                    </button>
+                    {% else %}
+                    <button type="button" class="btn btn-outline-danger btn-sm" disabled
+                            data-bs-toggle="tooltip" data-bs-title="Stop the timelapse before deleting">
+                        <i class="bi bi-trash"></i> Delete session
+                    </button>
+                    {% endif %}
+                </div>
+
+                {% if not first_frame %}
+                <div class="alert alert-secondary text-center" role="alert">
+                    <p class="mb-0">No frames captured in this session yet.</p>
+                </div>
+                {% elif session['frame_count'] == 1 %}
+                <div class="row justify-content-center">
+                    <div class="col-md-6 col-lg-5">
+                        <div class="card shadow-sm">
+                            <a href="{{ url_for('view_timelapse_frame', session_id=session['session_id'], filename=first_frame['filename']) }}">
+                                <img src="{{ url_for('static', filename='gallery/timelapses/' + session['session_id'] + '/' + first_frame['filename']) }}"
+                                     alt="Frame {{ first_frame['frame_number'] }}" class="card-img-top">
+                            </a>
+                            <div class="card-body text-center py-2">
+                                <p class="card-text small mb-0">Frame {{ first_frame['frame_number'] }}</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {% else %}
+                <div class="row align-items-center g-4">
+                    <div class="col-md-4">
+                        <div class="card shadow-sm h-100">
+                            <div class="card-header py-2 text-muted small">First frame</div>
+                            <a href="{{ url_for('view_timelapse_frame', session_id=session['session_id'], filename=first_frame['filename']) }}">
+                                <img src="{{ url_for('static', filename='gallery/timelapses/' + session['session_id'] + '/' + first_frame['filename']) }}"
+                                     alt="Frame {{ first_frame['frame_number'] }}" class="card-img-top">
+                            </a>
+                            <div class="card-body py-2 text-center">
+                                <p class="card-text small mb-0">Frame {{ first_frame['frame_number'] }}</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="col-md-4 text-center">
+                        <div class="py-3">
+                            <p class="display-6 mb-2">{{ session['frame_count'] }}</p>
+                            <p class="text-muted mb-4">
+                                frame{{ 's' if session['frame_count'] != 1 else '' }} captured
+                                {% if first_frame['frame_number'] != last_frame['frame_number'] %}
+                                <br><span class="small">from frame {{ first_frame['frame_number'] }} to {{ last_frame['frame_number'] }}</span>
+                                {% endif %}
+                            </p>
+                            <a href="{{ url_for('timelapse_session_frames', session_id=session['session_id']) }}" class="btn btn-primary">
+                                <i class="bi bi-grid-3x3-gap"></i> View all frames
+                            </a>
+                        </div>
+                    </div>
+
+                    <div class="col-md-4">
+                        <div class="card shadow-sm h-100">
+                            <div class="card-header py-2 text-muted small">Last frame</div>
+                            <a href="{{ url_for('view_timelapse_frame', session_id=session['session_id'], filename=last_frame['filename']) }}">
+                                <img src="{{ url_for('static', filename='gallery/timelapses/' + session['session_id'] + '/' + last_frame['filename']) }}"
+                                     alt="Frame {{ last_frame['frame_number'] }}" class="card-img-top">
+                            </a>
+                            <div class="card-body py-2 text-center">
+                                <p class="card-text small mb-0">Frame {{ last_frame['frame_number'] }}</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}

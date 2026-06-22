@@ -27,6 +27,22 @@
             </div>
 
             <div class="container">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <div class="btn-group" role="group" aria-label="Gallery type">
+                        <a href="{{ url_for('image_gallery') }}" class="btn btn-primary">Still Images</a>
+                        <a href="{{ url_for('timelapse_gallery') }}" class="btn btn-outline-primary">
+                            Timelapses{% if timelapse_count %} ({{ timelapse_count }}){% endif %}
+                        </a>
+                    </div>
+                </div>
+
+                {% if empty_gallery %}
+                <div class="alert alert-secondary text-center" role="alert">
+                    <h5 class="alert-heading">No still images yet</h5>
+                    <p class="mb-0">Capture photos from a camera, or browse timelapse sessions.</p>
+                </div>
+                {% endif %}
+
                 <div class="row row-cols-1 row-cols-sm-2 row-cols-md-3 g-3" id="image-gallery">
                     {% for file_data in image_files %}
                     <div class="col" id="card_{{ file_data['filename'] }}">
@@ -75,6 +91,7 @@
 <!-- Fixed Footer for Controls -->
 <footer class="bg-dark text-center py-2 fixed-bottom">
     <div class="d-flex justify-content-around">
+        {% if not empty_gallery and total_pages > 1 %}
         <nav class="mt-3" aria-label="Page navigation">
             <ul class="pagination justify-content-center">
                 <li class="page-item {% if page == 1 %}disabled{% endif %}">
@@ -100,6 +117,7 @@
                 </li>
             </ul>
         </nav>
+        {% endif %}
     </div>
 </footer>
 <script>
