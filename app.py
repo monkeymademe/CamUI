@@ -1,5 +1,5 @@
 # System level imports
-import os, io, json, time, tempfile, traceback, re, shutil
+import os, io, json, time, tempfile, traceback, re, shutil, zipfile
 from datetime import datetime
 from threading import Condition
 import threading, subprocess
@@ -2239,6 +2239,71 @@ class ImageGallery:
         
         return image  # Extract only the filename
     
+    def _is_valid_gallery_file(self, filename):
+        safe_name = secure_filename(filename)
+        if not safe_name or safe_name != filename:
+            return False
+        if not (safe_name.lower().endswith('.jpg') or safe_name.lower().endswith('.dng')):
+            return False
+        file_path = os.path.join(self.upload_folder, safe_name)
+        if not os.path.isfile(file_path):
+            return False
+        if not is_safe_path(self.upload_folder, file_path):
+            return False
+        if os.path.dirname(os.path.realpath(file_path)) != os.path.realpath(self.upload_folder):
+            return False
+        return True
+
+    def delete_images(self, filenames):
+        deleted = []
+        errors = []
+        seen = set()
+        for filename in filenames or []:
+            if filename in seen:
+                continue
+            seen.add(filename)
+            if not self._is_valid_gallery_file(filename):
+                errors.append(f"{filename}: invalid or not found")
+                continue
+            success, message = self.delete_image(filename)
+            if success:
+                deleted.append(filename)
+            else:
+                errors.append(f"{filename}: {message}")
+        return deleted, errors
+
+    def create_selection_zip(self, filenames):
+        archive_files = []
+        seen = set()
+        for filename in filenames or []:
+            if not filename.lower().endswith('.jpg'):
+                continue
+            if not self._is_valid_gallery_file(filename):
+                continue
+            for candidate in (filename, os.path.splitext(filename)[0] + '.dng'):
+                if candidate in seen or not self._is_valid_gallery_file(candidate):
+                    continue
+                seen.add(candidate)
+                archive_files.append(candidate)
+
+        if not archive_files:
+            return None, "No valid images selected"
+
+        tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".zip", prefix="gallery_")
+        tmp.close()
+        try:
+            with zipfile.ZipFile(tmp.name, "w", zipfile.ZIP_DEFLATED) as archive:
+                for name in sorted(archive_files):
+                    archive.write(
+                        os.path.join(self.upload_folder, name),
+                        arcname=name,
+                    )
+            return tmp.name, None
+        except Exception as e:
+            if os.path.exists(tmp.name):
+                os.remove(tmp.name)
+            return None, str(e)
+
     def delete_image(self, filename):
         image_path = os.path.join(self.upload_folder, filename)
 
@@ -3197,6 +3262,54 @@ def view_image(filename):
     if not os.path.isfile(image_path) or not is_safe_path(app.config['upload_folder'], image_path):
         abort(404)
     return render_template('view_image.html', filename=safe_filename)
+
+@app.route('/batch_delete_images', methods=['POST'])
+def batch_delete_images():
+    data = request.get_json(silent=True) or {}
+    filenames = data.get('filenames') or []
+    if not isinstance(filenames, list) or not filenames:
+        return jsonify({"success": False, "message": "No images selected"}), 400
+
+    deleted, errors = image_gallery_manager.delete_images(filenames)
+    if not deleted:
+        return jsonify({
+            "success": False,
+            "message": "; ".join(errors) if errors else "No images deleted",
+            "errors": errors,
+        }), 400
+
+    return jsonify({
+        "success": True,
+        "deleted": deleted,
+        "deleted_count": len(deleted),
+        "errors": errors,
+        "message": f"Deleted {len(deleted)} image(s).",
+    })
+
+@app.route('/batch_download_images', methods=['POST'])
+def batch_download_images():
+    data = request.get_json(silent=True) or {}
+    filenames = data.get('filenames') or []
+    if not isinstance(filenames, list) or not filenames:
+        return jsonify({"success": False, "message": "No images selected"}), 400
+
+    zip_path, error = image_gallery_manager.create_selection_zip(filenames)
+    if error:
+        return jsonify({"success": False, "message": error}), 400
+
+    download_name = secure_filename(f"gallery_selection_{len(filenames)}_images.zip")
+    if not download_name:
+        download_name = "gallery_selection.zip"
+
+    @after_this_request
+    def cleanup(response):
+        try:
+            os.remove(zip_path)
+        except OSError:
+            pass
+        return response
+
+    return send_file(zip_path, as_attachment=True, download_name=download_name)
 
 @app.route('/delete_image/<filename>', methods=['DELETE'])
 def delete_image(filename):

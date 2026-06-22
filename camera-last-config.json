@@ -2,17 +2,12 @@
     "cameras": [
         {
             "Num": 0,
-            "Model": "imx500",
+            "Model": "imx477",
             "Is_Pi_Cam": true,
-            "Has_Config": true,
-            "Config_Location": "kjb.json"
-        },
-        {
-            "Num": 1,
-            "Model": "imx708_wide",
-            "Is_Pi_Cam": true,
-            "Has_Config": true,
-            "Config_Location": "gojerpogjb.json"
+            "Has_Config": false,
+            "Config_Location": "default_imx477.json",
+            "Tuning_File": "imx477.json",
+            "NoIR_Mode": false
         }
     ]
 }

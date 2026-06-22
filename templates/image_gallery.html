@@ -27,12 +27,37 @@
             </div>
 
             <div class="container">
-                <div class="d-flex justify-content-between align-items-center mb-3">
+                <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
                     <div class="btn-group" role="group" aria-label="Gallery type">
                         <a href="{{ url_for('image_gallery') }}" class="btn btn-primary">Still Images</a>
                         <a href="{{ url_for('timelapse_gallery') }}" class="btn btn-outline-primary">
                             Timelapses{% if timelapse_count %} ({{ timelapse_count }}){% endif %}
                         </a>
+                    </div>
+                    {% if not empty_gallery %}
+                    <div class="d-flex align-items-center gap-2">
+                        <button type="button" class="btn btn-outline-secondary" id="toggleSelectionModeBtn">
+                            <i class="bi bi-check2-square"></i> Select
+                        </button>
+                    </div>
+                    {% endif %}
+                </div>
+
+                <div class="alert alert-secondary d-none align-items-center justify-content-between flex-wrap gap-2 mb-3" id="selectionToolbar" role="toolbar">
+                    <div class="d-flex align-items-center gap-3 flex-wrap">
+                        <span id="selectionCountLabel">0 selected</span>
+                        <button type="button" class="btn btn-sm btn-link p-0" id="selectAllPageBtn">Select all on page</button>
+                        <button type="button" class="btn btn-sm btn-link p-0" id="clearSelectionBtn">Clear</button>
+                    </div>
+                    <div class="d-flex align-items-center gap-2">
+                        <button type="button" class="btn btn-sm btn-outline-primary" id="batchDownloadBtn" disabled>
+                            <i class="bi bi-download"></i> Download
+                        </button>
+                        <button type="button" class="btn btn-sm btn-outline-danger" id="batchDeleteBtn" disabled
+                            data-bs-toggle="modal" data-bs-target="#deleteConfirmationModal">
+                            <i class="bi bi-trash"></i> Delete
+                        </button>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="exitSelectionModeBtn">Done</button>
                     </div>
                 </div>
 
@@ -45,22 +70,29 @@
 
                 <div class="row row-cols-1 row-cols-sm-2 row-cols-md-3 g-3" id="image-gallery">
                     {% for file_data in image_files %}
-                    <div class="col" id="card_{{ file_data['filename'] }}">
-                        <div class="card shadow-sm">
-                            <a href="/view_image/{{ file_data['filename'] }}">
-                                <img src="{{ url_for('static', filename='gallery/' + file_data['filename']) }}" alt="{{ file_data['filename'] }}" class="bd-placeholder-img card-img-top" width="100%">
-                                {% if file_data['has_dng'] %}
-                                <span class="badge rounded-pill text-bg-secondary position-absolute top-0 end-0 m-2">
-                                    DNG
-                                </span>
-                                {% endif %}
-                            </a>
+                    <div class="col gallery-card-col" id="card_{{ file_data['filename'] }}" data-filename="{{ file_data['filename'] }}">
+                        <div class="card shadow-sm gallery-card">
+                            <div class="position-relative">
+                                <div class="gallery-select-overlay d-none position-absolute top-0 start-0 m-2" style="z-index: 2;">
+                                    <input class="form-check-input gallery-select-checkbox" type="checkbox"
+                                        value="{{ file_data['filename'] }}"
+                                        aria-label="Select {{ file_data['filename'] }}">
+                                </div>
+                                <a href="/view_image/{{ file_data['filename'] }}" class="gallery-card-link">
+                                    <img src="{{ url_for('static', filename='gallery/' + file_data['filename']) }}" alt="{{ file_data['filename'] }}" class="bd-placeholder-img card-img-top" width="100%">
+                                    {% if file_data['has_dng'] %}
+                                    <span class="badge rounded-pill text-bg-secondary position-absolute top-0 end-0 m-2">
+                                        DNG
+                                    </span>
+                                    {% endif %}
+                                </a>
+                            </div>
                             <div class="card-body">
                                 <p class="card-text">
                                     Date taken: {{ file_data['timestamp'] }}<br>
                                     Resolution: {{ file_data['width'] }}x{{ file_data['height'] }}
                                 </p>
-                                <div class="d-flex justify-content-between align-items-center">
+                                <div class="d-flex justify-content-between align-items-center gallery-card-actions">
                                     <div class="btn-group">
                                         <button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.location.href='/image_edit/{{ file_data['filename'] }}'" data-bs-toggle="tooltip" data-bs-title="Edit Image">
                                             <i class="bi bi-pencil"></i>
@@ -176,9 +208,277 @@
 </footer>
 <script>
 (function () {
+    const SELECTION_STORAGE_KEY = 'camui_gallery_selection';
     const modalEl = document.getElementById('deleteConfirmationModal');
     const confirmButton = document.getElementById('confirmDeleteButton');
     const modalBody = document.getElementById('deleteConfirmationModalBody');
+    const galleryEl = document.getElementById('image-gallery');
+    const selectionToolbar = document.getElementById('selectionToolbar');
+    const toggleSelectionModeBtn = document.getElementById('toggleSelectionModeBtn');
+    const exitSelectionModeBtn = document.getElementById('exitSelectionModeBtn');
+    const selectionCountLabel = document.getElementById('selectionCountLabel');
+    const selectAllPageBtn = document.getElementById('selectAllPageBtn');
+    const clearSelectionBtn = document.getElementById('clearSelectionBtn');
+    const batchDownloadBtn = document.getElementById('batchDownloadBtn');
+    const batchDeleteBtn = document.getElementById('batchDeleteBtn');
+
+    let selectionMode = false;
+
+    function getSelection() {
+        try {
+            const raw = sessionStorage.getItem(SELECTION_STORAGE_KEY);
+            const parsed = raw ? JSON.parse(raw) : [];
+            return Array.isArray(parsed) ? parsed : [];
+        } catch (error) {
+            return [];
+        }
+    }
+
+    function setSelection(filenames) {
+        const unique = [...new Set(filenames)];
+        sessionStorage.setItem(SELECTION_STORAGE_KEY, JSON.stringify(unique));
+        updateSelectionUi();
+    }
+
+    function toggleCardSelection(filename) {
+        const selected = new Set(getSelection());
+        if (selected.has(filename)) {
+            selected.delete(filename);
+        } else {
+            selected.add(filename);
+        }
+        setSelection([...selected]);
+    }
+
+    function updateSelectionUi() {
+        const selected = new Set(getSelection());
+        const count = selected.size;
+
+        document.querySelectorAll('.gallery-select-checkbox').forEach((checkbox) => {
+            checkbox.checked = selected.has(checkbox.value);
+        });
+
+        if (selectionCountLabel) {
+            selectionCountLabel.textContent = `${count} selected`;
+        }
+        if (batchDownloadBtn) {
+            batchDownloadBtn.disabled = count === 0;
+        }
+        if (batchDeleteBtn) {
+            batchDeleteBtn.disabled = count === 0;
+        }
+
+        document.querySelectorAll('.gallery-card-col').forEach((col) => {
+            col.classList.toggle('gallery-card-selected', selected.has(col.dataset.filename));
+        });
+    }
+
+    function setSelectionMode(enabled) {
+        selectionMode = enabled;
+        document.body.classList.toggle('gallery-selection-mode', enabled);
+        document.querySelectorAll('.gallery-select-overlay').forEach((overlay) => {
+            overlay.classList.toggle('d-none', !enabled);
+        });
+        document.querySelectorAll('.gallery-card-actions').forEach((actions) => {
+            actions.classList.toggle('d-none', enabled);
+        });
+        if (selectionToolbar) {
+            selectionToolbar.classList.toggle('d-none', !enabled);
+            selectionToolbar.classList.toggle('d-flex', enabled);
+        }
+        if (toggleSelectionModeBtn) {
+            toggleSelectionModeBtn.classList.toggle('active', enabled);
+            toggleSelectionModeBtn.innerHTML = enabled
+                ? '<i class="bi bi-check2-square"></i> Selecting'
+                : '<i class="bi bi-check2-square"></i> Select';
+        }
+        if (!enabled) {
+            setSelection([]);
+        } else {
+            updateSelectionUi();
+        }
+    }
+
+    function buildGalleryCardHtml(fileData) {
+        return `
+            <div class="col gallery-card-col" id="card_${fileData.filename}" data-filename="${fileData.filename}">
+                <div class="card shadow-sm gallery-card">
+                    <div class="position-relative">
+                        <div class="gallery-select-overlay ${selectionMode ? '' : 'd-none'} position-absolute top-0 start-0 m-2" style="z-index: 2;">
+                            <input class="form-check-input gallery-select-checkbox" type="checkbox"
+                                value="${fileData.filename}"
+                                aria-label="Select ${fileData.filename}">
+                        </div>
+                        <a href="/view_image/${fileData.filename}" class="gallery-card-link">
+                            <img src="/static/gallery/${fileData.filename}" alt="${fileData.filename}" class="bd-placeholder-img card-img-top" width="100%">
+                            ${fileData.has_dng ? '<span class="badge rounded-pill text-bg-secondary position-absolute top-0 end-0 m-2">DNG</span>' : ''}
+                        </a>
+                    </div>
+                    <div class="card-body">
+                        <p class="card-text">
+                            Date taken: ${fileData.timestamp}<br>
+                            Resolution: ${fileData.width}x${fileData.height}
+                        </p>
+                        <div class="d-flex justify-content-between align-items-center gallery-card-actions ${selectionMode ? 'd-none' : ''}">
+                            <div class="btn-group">
+                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.location.href='/image_edit/${fileData.filename}'" title="Edit Image">
+                                    <i class="bi bi-pencil"></i>
+                                </button>
+                                <button type="button" class="btn btn-sm btn-outline-danger gallery-delete-btn"
+                                    data-bs-toggle="modal"
+                                    data-bs-target="#deleteConfirmationModal"
+                                    data-filename="${fileData.filename}"
+                                    title="Delete Image">
+                                    <i class="bi bi-trash"></i>
+                                </button>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.location.href='/download_image/${fileData.filename}'" title="Download Image">
+                                    <i class="bi bi-download"></i>
+                                </button>
+                                ${fileData.has_dng ? `
+                                <button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.location.href='/download_image/${fileData.dng_file}'" title="Download DNG">
+                                    <i class="bi bi-file-earmark-arrow-down"></i>
+                                </button>` : ''}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    function bindGalleryCheckboxes() {
+        document.querySelectorAll('.gallery-select-checkbox').forEach((checkbox) => {
+            if (checkbox.dataset.bound === 'true') {
+                return;
+            }
+            checkbox.dataset.bound = 'true';
+            checkbox.addEventListener('click', function (event) {
+                event.stopPropagation();
+            });
+            checkbox.addEventListener('change', function () {
+                const selected = new Set(getSelection());
+                if (checkbox.checked) {
+                    selected.add(checkbox.value);
+                } else {
+                    selected.delete(checkbox.value);
+                }
+                setSelection([...selected]);
+            });
+        });
+    }
+
+    galleryEl?.addEventListener('click', function (event) {
+        if (!selectionMode) {
+            return;
+        }
+        const col = event.target.closest('.gallery-card-col');
+        if (!col?.dataset.filename) {
+            return;
+        }
+        event.preventDefault();
+        toggleCardSelection(col.dataset.filename);
+    });
+
+    function batchDownloadSelected() {
+        const filenames = getSelection();
+        if (!filenames.length) {
+            return;
+        }
+
+        batchDownloadBtn.disabled = true;
+        fetch('/batch_download_images', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filenames }),
+        })
+        .then(async (response) => {
+            if (!response.ok) {
+                const data = await response.json().catch(() => ({}));
+                throw new Error(data.message || 'Download failed');
+            }
+            return response.blob();
+        })
+        .then((blob) => {
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `gallery_selection_${filenames.length}_images.zip`;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+        })
+        .catch((error) => {
+            alert('Failed to download selected images: ' + error.message);
+        })
+        .finally(() => {
+            batchDownloadBtn.disabled = getSelection().length === 0;
+        });
+    }
+
+    function batchDeleteSelected() {
+        const filenames = getSelection();
+        if (!filenames.length) {
+            return;
+        }
+
+        confirmButton.disabled = true;
+        fetch('/batch_delete_images', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ filenames }),
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (!data.success) {
+                throw new Error(data.message || 'Delete failed');
+            }
+
+            filenames.forEach((filename) => {
+                document.getElementById(`card_${filename}`)?.remove();
+            });
+            setSelection(getSelection().filter(name => !data.deleted.includes(name)));
+            bootstrap.Modal.getInstance(modalEl)?.hide();
+            confirmButton.blur();
+
+            if (data.errors && data.errors.length) {
+                alert(`Deleted ${data.deleted_count} image(s). Some files could not be removed:\n${data.errors.join('\n')}`);
+            }
+
+            if (galleryEl && galleryEl.children.length === 0) {
+                window.location.reload();
+            }
+        })
+        .catch(error => {
+            alert('Failed to delete selected images: ' + error.message);
+        })
+        .finally(() => {
+            confirmButton.disabled = false;
+        });
+    }
+
+    toggleSelectionModeBtn?.addEventListener('click', () => {
+        setSelectionMode(!selectionMode);
+    });
+    exitSelectionModeBtn?.addEventListener('click', () => {
+        setSelectionMode(false);
+    });
+    selectAllPageBtn?.addEventListener('click', () => {
+        const pageFilenames = [...document.querySelectorAll('#image-gallery .gallery-select-checkbox')]
+            .map(checkbox => checkbox.value);
+        setSelection([...getSelection(), ...pageFilenames]);
+    });
+    clearSelectionBtn?.addEventListener('click', () => {
+        setSelection([]);
+    });
+    batchDownloadBtn?.addEventListener('click', batchDownloadSelected);
+
+    bindGalleryCheckboxes();
+    if (getSelection().length > 0 && toggleSelectionModeBtn) {
+        setSelectionMode(true);
+    } else {
+        updateSelectionUi();
+    }
 
     if (!modalEl || !confirmButton || !modalBody) {
         return;
@@ -187,6 +487,14 @@
     modalEl.addEventListener('show.bs.modal', function (event) {
         const trigger = event.relatedTarget;
         if (!trigger) {
+            return;
+        }
+
+        if (trigger.id === 'batchDeleteBtn') {
+            const count = getSelection().length;
+            confirmButton.dataset.action = 'batch';
+            delete confirmButton.dataset.filename;
+            modalBody.textContent = `Delete ${count} selected image(s)? Associated DNG files will also be removed. This cannot be undone.`;
             return;
         }
 
@@ -235,6 +543,11 @@
             return;
         }
 
+        if (action === 'batch') {
+            batchDeleteSelected();
+            return;
+        }
+
         const selectedFilename = confirmButton.dataset.filename;
         if (!selectedFilename) {
             return;
@@ -250,6 +563,11 @@
                 return response.json();
             })
             .then(() => {
+                const selected = getSelection();
+                if (selected.includes(selectedFilename)) {
+                    setSelection(selected.filter(name => name !== selectedFilename));
+                }
+
                 const corruptCard = document.getElementById(`corrupt_card_${selectedFilename}`);
                 if (corruptCard) {
                     corruptCard.remove();
@@ -277,53 +595,16 @@
                 return response.json();
             })
             .then(data => {
-                if (!data) {
+                if (!data || !galleryEl) {
                     return;
                 }
 
-                const gallery = document.getElementById('image-gallery');
-                gallery.innerHTML = '';
+                galleryEl.innerHTML = '';
                 data.image_files.forEach(fileData => {
-                    const card = document.createElement('div');
-                    card.classList.add('col');
-                    card.id = `card_${fileData.filename}`;
-                    card.innerHTML = `
-                        <div class="card shadow-sm">
-                            <a href="/view_image/${fileData.filename}">
-                                <img src="/static/gallery/${fileData.filename}" alt="${fileData.filename}" class="bd-placeholder-img card-img-top" width="100%">
-                                ${fileData.has_dng ? '<span class="badge rounded-pill text-bg-secondary position-absolute top-0 end-0 m-2">DNG</span>' : ''}
-                            </a>
-                            <div class="card-body">
-                                <p class="card-text">
-                                    Date taken: ${fileData.timestamp}<br>
-                                    Resolution: ${fileData.width}x${fileData.height}
-                                </p>
-                                <div class="d-flex justify-content-between align-items-center">
-                                    <div class="btn-group">
-                                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.location.href='/image_edit/${fileData.filename}'" title="Edit Image">
-                                            <i class="bi bi-pencil"></i>
-                                        </button>
-                                        <button type="button" class="btn btn-sm btn-outline-danger gallery-delete-btn"
-                                            data-bs-toggle="modal"
-                                            data-bs-target="#deleteConfirmationModal"
-                                            data-filename="${fileData.filename}"
-                                            title="Delete Image">
-                                            <i class="bi bi-trash"></i>
-                                        </button>
-                                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.location.href='/download_image/${fileData.filename}'" title="Download Image">
-                                            <i class="bi bi-download"></i>
-                                        </button>
-                                        ${fileData.has_dng ? `
-                                        <button type="button" class="btn btn-sm btn-outline-secondary" onclick="window.location.href='/download_image/${fileData.dng_file}'" title="Download DNG">
-                                            <i class="bi bi-file-earmark-arrow-down"></i>
-                                        </button>` : ''}
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    `;
-                    gallery.appendChild(card);
+                    galleryEl.insertAdjacentHTML('beforeend', buildGalleryCardHtml(fileData));
                 });
+                bindGalleryCheckboxes();
+                updateSelectionUi();
 
                 const paginationContainer = document.querySelector('ul.pagination');
                 if (paginationContainer) {
@@ -360,5 +641,22 @@
     });
 })();
 </script>
+<style>
+.gallery-card-selected .gallery-card {
+    outline: 2px solid var(--bs-primary);
+    outline-offset: 2px;
+}
+.gallery-selection-mode .gallery-select-checkbox {
+    width: 1.25rem;
+    height: 1.25rem;
+    cursor: pointer;
+}
+.gallery-selection-mode .gallery-card-col {
+    cursor: pointer;
+}
+.gallery-selection-mode .gallery-card-col .gallery-card-link {
+    cursor: pointer;
+}
+</style>
 
 {% endblock %}
