@@ -345,13 +345,9 @@ function updateUIFromCameraProfile(cameraProfile) {
                 console.log(`Set ${key} (input) to:`, element.value);
             }
 
-            // Update UI labels for range inputs
-            if (element.type === "range") {
-                let valueLabel = document.getElementById("current" + key);
-                if (valueLabel) {
-                    valueLabel.textContent = `Value: ${value}`;
-                    console.log(`Updated label for ${key} to:`, valueLabel.textContent);
-                }
+            if (element.classList?.contains("numeric-value-input") || element.type === "range") {
+                syncCoarseSlider(key, value);
+                updateSettingLabel(key, value);
             }
         }
     } 
@@ -397,13 +393,9 @@ function updateUIFromCameraProfile(cameraProfile) {
                 console.log(`Set ${key} (input) to:`, element.value);
             }
 
-            // Update UI labels for range inputs
-            if (element.type === "range") {
-                let valueLabel = document.getElementById("current" + key);
-                if (valueLabel) {
-                    valueLabel.textContent = `Value: ${value}`;
-                    console.log(`Updated label for ${key} to:`, valueLabel.textContent);
-                }
+            if (element.classList?.contains("numeric-value-input") || element.type === "range") {
+                syncCoarseSlider(key, value);
+                updateSettingLabel(key, value);
             }
         }
     }
@@ -500,92 +492,184 @@ function updateSetting(settingId, newValue) {
     .catch(error => console.error("Request failed:", error));
 }
 
-// Function for slider settings
-function adjustSliderSetting(settingId, value) {
-    const slider = document.getElementById(settingId);
+// Function for slider / numeric settings
+function getSettingControl(settingId) {
+    return document.getElementById(settingId);
+}
+
+function parseSettingBounds(el) {
+    if (!el) return { min: 0, max: 100, step: 1, wideRange: false };
+    return {
+        min: parseFloat(el.dataset.min ?? el.min),
+        max: parseFloat(el.dataset.max ?? el.max),
+        step: parseFloat(el.dataset.originalStep ?? el.step) || 1,
+        wideRange: el.dataset.wideRange === "true",
+    };
+}
+
+function clampSettingValue(value, min, max, step) {
+    let v = Math.min(max, Math.max(min, parseFloat(value)));
+    if (Number.isNaN(v)) {
+        v = min;
+    }
+    if (step > 0) {
+        const decimals = (String(step).split(".")[1] || "").length;
+        v = Math.round(v / step) * step;
+        if (decimals > 0) {
+            v = parseFloat(v.toFixed(decimals));
+        } else {
+            v = Math.round(v);
+        }
+    } else {
+        v = Math.round(v);
+    }
+    return Math.min(max, Math.max(min, v));
+}
+
+function valueToLogPercent(value, min, max) {
+    const safeMin = Math.max(min, 0.001);
+    const safeValue = Math.max(parseFloat(value) || safeMin, safeMin);
+    const logMin = Math.log(safeMin);
+    const logMax = Math.log(Math.max(max, safeMin + 0.001));
+    if (logMax === logMin) {
+        return 0;
+    }
+    return 100 * (Math.log(safeValue) - logMin) / (logMax - logMin);
+}
+
+function logPercentToValue(percent, min, max) {
+    const safeMin = Math.max(min, 0.001);
+    const safeMax = Math.max(max, safeMin + 0.001);
+    const logMin = Math.log(safeMin);
+    const logMax = Math.log(safeMax);
+    return Math.exp(logMin + (percent / 100) * (logMax - logMin));
+}
+
+function nudgeSettingValue(current, direction, bounds) {
+    const value = parseFloat(current);
+    const span = bounds.max - bounds.min;
+    if (bounds.wideRange && span > 10000 && bounds.min >= 1) {
+        const factor = direction > 0 ? 1.1 : (1 / 1.1);
+        return clampSettingValue(value * factor, bounds.min, bounds.max, 1);
+    }
+    return clampSettingValue(value + direction * bounds.step, bounds.min, bounds.max, bounds.step);
+}
+
+function formatSettingDisplayValue(value, control, conversionSwitch) {
+    if (control?.dataset.conversionEnabled === "true" && conversionSwitch?.checked) {
+        const factor = parseFloat(control.dataset.conversionFactor);
+        if (!Number.isNaN(factor) && factor !== 0) {
+            return (value / factor).toFixed(3);
+        }
+    }
+    const step = parseFloat(control?.dataset.originalStep ?? control?.step) || 1;
+    const decimals = (String(step).split(".")[1] || "").length;
+    return decimals > 0 ? Number(value).toFixed(decimals) : String(Math.round(value));
+}
+
+function syncCoarseSlider(settingId, value) {
+    const control = getSettingControl(settingId);
+    const coarse = document.getElementById(settingId + "_coarse");
+    if (!control || !coarse) return;
+    const bounds = parseSettingBounds(control);
+    coarse.value = valueToLogPercent(value, bounds.min, bounds.max);
+}
+
+function updateSettingLabel(settingId, value) {
+    const control = getSettingControl(settingId);
     const valueLabel = document.getElementById("current" + settingId);
     const unitLabel = document.getElementById(settingId + "_unit_label");
     const conversionSwitch = document.getElementById(settingId + "_conversion");
-
-    // Check for conversion
-    let displayValue = value;
-    if (slider?.dataset.conversionEnabled === "true" && conversionSwitch?.checked) {
-        const factor = parseFloat(slider.dataset.conversionFactor);
-        if (!isNaN(factor)) {
-            displayValue = (value / factor).toFixed(3);
-        }
+    if (!valueLabel) return;
+    const displayValue = formatSettingDisplayValue(value, control, conversionSwitch);
+    valueLabel.textContent = `Value: ${displayValue}`;
+    if (unitLabel) {
+        unitLabel.style.display = "inline";
     }
+}
 
-    if (valueLabel) {
-        valueLabel.textContent = `Value: ${displayValue}`;
-        if (unitLabel) {
-            unitLabel.style.display = 'inline';
-        }
+function adjustSliderSetting(settingId, value, options = {}) {
+    const control = getSettingControl(settingId);
+    if (!control) return;
+
+    const bounds = parseSettingBounds(control);
+    const clamped = clampSettingValue(value, bounds.min, bounds.max, bounds.step);
+    control.value = clamped;
+    syncCoarseSlider(settingId, clamped);
+    updateSettingLabel(settingId, clamped);
+
+    if (!options.skipServer) {
+        updateSetting(settingId, clamped);
     }
+}
 
-    // Always send raw value to server
-    updateSetting(settingId, value);
+function initWideRangeControls() {
+    document.querySelectorAll(".numeric-value-input").forEach((input) => {
+        const settingId = input.id;
+        syncCoarseSlider(settingId, input.value);
+        updateSettingLabel(settingId, input.value);
+
+        input.addEventListener("change", () => {
+            adjustSliderSetting(settingId, input.value);
+        });
+    });
+
+    document.querySelectorAll(".numeric-step-btn").forEach((button) => {
+        button.addEventListener("click", () => {
+            const settingId = button.dataset.settingId;
+            const direction = parseInt(button.dataset.direction, 10);
+            const control = getSettingControl(settingId);
+            if (!control) return;
+            const bounds = parseSettingBounds(control);
+            const next = nudgeSettingValue(control.value, direction, bounds);
+            adjustSliderSetting(settingId, next);
+        });
+    });
+
+    document.querySelectorAll('input[data-scale="log"][data-target]').forEach((coarse) => {
+        const settingId = coarse.dataset.target;
+        const previewCoarse = () => {
+            const control = getSettingControl(settingId);
+            if (!control) return;
+            const bounds = parseSettingBounds(control);
+            const value = logPercentToValue(parseFloat(coarse.value), bounds.min, bounds.max);
+            const clamped = clampSettingValue(value, bounds.min, bounds.max, bounds.step);
+            control.value = clamped;
+            updateSettingLabel(settingId, clamped);
+        };
+        coarse.addEventListener("input", previewCoarse);
+        coarse.addEventListener("change", () => {
+            const control = getSettingControl(settingId);
+            if (!control) return;
+            adjustSliderSetting(settingId, control.value);
+        });
+    });
 }
 
 document.addEventListener("DOMContentLoaded", function () {
+    initWideRangeControls();
+
     document.querySelectorAll('[id$="_conversion"]').forEach(switchElem => {
         const settingId = switchElem.id.replace('_conversion', '');
-        const slider = document.getElementById(settingId);
-
-        if (!slider) return;
+        const control = getSettingControl(settingId);
+        if (!control) return;
 
         switchElem.addEventListener("change", () => {
-            const isEnabled = switchElem.checked;
-            const originalStep = slider.dataset.originalStep;
-            const customStep = slider.dataset.conversionStep;
-            const factor = parseFloat(slider.dataset.conversionFactor);
-
-            if (isEnabled && !isNaN(factor)) {
-                if (customStep) {
-                    slider.step = customStep;
-                } else {
-                    slider.step = (parseFloat(originalStep) / factor).toFixed(6);
-                }
-            } else {
-                slider.step = originalStep;
-            }
-
-            // Update label immediately after switching
-            adjustSliderSetting(settingId, slider.value);
+            updateSettingLabel(settingId, control.value);
         });
     });
 });
 
 document.addEventListener("DOMContentLoaded", function () {
-        document.querySelectorAll('input[type="range"]').forEach(slider => {
-            const settingId = slider.id;
-            const conversionEnabled = slider.dataset.conversionEnabled === "true";
-            const conversionSwitch = document.getElementById(settingId + "_conversion");
-    
-            if (conversionEnabled && conversionSwitch?.checked) {
-                adjustSliderSetting(settingId, slider.value);
-            }
-        });
-    });
+    document.querySelectorAll('input[type="range"]:not([data-scale="log"])').forEach(slider => {
+        const settingId = slider.id;
+        const conversionEnabled = slider.dataset.conversionEnabled === "true";
+        const conversionSwitch = document.getElementById(settingId + "_conversion");
 
-conversionSwitch.addEventListener("change", () => {
-    const isEnabled = conversionSwitch.checked;
-    const originalStep = slider.dataset.originalStep;
-    const customStep = slider.dataset.conversionStep;
-    const factor = parseFloat(slider.dataset.conversionFactor);
-
-    if (isEnabled && !isNaN(factor)) {
-        if (customStep) {
-            slider.step = customStep;
-        } else {
-            slider.step = (parseFloat(originalStep) / factor).toFixed(6);
+        if (conversionEnabled && conversionSwitch?.checked) {
+            updateSettingLabel(settingId, slider.value);
         }
-    } else {
-        slider.step = originalStep;
-    }
-
-    // Update label with newly converted value
-    adjustSliderSetting(settingId, slider.value);
+    });
 });
 
 // Function for switch settings

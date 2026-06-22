@@ -1,14 +1,22 @@
-<div class="mb-3">
+{% set current = setting.get("value", setting.get("default")) %}
+{% set vmin = setting.min | float %}
+{% set vmax = setting.max | float %}
+{% set vstep = (setting.step | float) if setting.step is not none else 1.0 %}
+{% set span = vmax - vmin %}
+{% set step_count = (span / vstep) if vstep > 0 else span %}
+{% set use_wide = setting.get('input_mode') == 'wide' or (setting.get('input_mode', 'auto') != 'slider' and (span > 10000 or step_count > 500)) %}
+
+<div class="mb-3 numeric-setting" data-setting-id="{{ setting.id }}" data-wide-range="{{ 'true' if use_wide else 'false' }}">
     <!-- Setting Label & Info -->
     <div class="d-flex w-100 align-items-center justify-content-between">
         <strong class="mb-1">{{ setting.name }}</strong>
-        {% if setting.info %}                             
+        {% if setting.info %}
         <a data-bs-toggle="collapse" href="#{{ setting.id }}_info" role="button">
             <i class="bi bi-info-circle"></i>
         </a>
         {% endif %}
     </div>
-    
+
     {% if setting.info %}
     <div class="collapse p-2" id="{{ setting.id }}_info">
         <div class="card card-body">
@@ -25,26 +33,60 @@
     <!-- Label + Value -->
     {% if setting.label %}
     <label for="{{ setting.id }}" class="form-label mb-0" id="current{{ setting.id }}">
-        Value: {{ setting.get("value", setting.get("default")) }}
+        Value: {{ current }}
         {% if setting.conversion and setting.conversion.enabled %}
         <span id="{{ setting.id }}_unit_label">({{ setting.conversion.label }})</span>
         {% endif %}
     </label>
     {% endif %}
 
-    <!-- Slider -->
-    <input type="range" class="form-range" id="{{ setting.id }}" 
-    min="{{ setting.min }}" max="{{ setting.max }}" step="{{ setting.step }}" 
-    value="{{ setting.get("value", setting.get("default")) }}"
-    data-original-step="{{ setting.step }}"
-    {% if setting.conversion and setting.conversion.enabled %}
-        data-conversion-enabled="true"
-        data-conversion-factor="{{ setting.conversion.factor }}"
-        {% if setting.conversion.step %}
-            data-conversion-step="{{ setting.conversion.step }}"
+    {% if use_wide %}
+    <!-- Wide range: number entry + step buttons + logarithmic coarse slider -->
+    <div class="input-group input-group-lg my-2">
+        <button class="btn btn-outline-secondary btn-lg numeric-step-btn" type="button"
+                data-setting-id="{{ setting.id }}" data-direction="-1" aria-label="Decrease">−</button>
+        <input type="number" class="form-control text-center numeric-value-input" id="{{ setting.id }}"
+            min="{{ setting.min }}" max="{{ setting.max }}" step="any"
+            value="{{ current }}"
+            inputmode="decimal"
+            data-min="{{ setting.min }}"
+            data-max="{{ setting.max }}"
+            data-original-step="{{ setting.step }}"
+            data-wide-range="true"
+            {% if setting.conversion and setting.conversion.enabled %}
+                data-conversion-enabled="true"
+                data-conversion-factor="{{ setting.conversion.factor }}"
+                {% if setting.conversion.step %}
+                    data-conversion-step="{{ setting.conversion.step }}"
+                {% endif %}
+            {% endif %}>
+        <button class="btn btn-outline-secondary btn-lg numeric-step-btn" type="button"
+                data-setting-id="{{ setting.id }}" data-direction="1" aria-label="Increase">+</button>
+    </div>
+    <label class="form-label small text-muted mb-1" for="{{ setting.id }}_coarse">Coarse adjust</label>
+    <input type="range" class="form-range" id="{{ setting.id }}_coarse"
+        min="0" max="100" step="1"
+        value="50"
+        data-target="{{ setting.id }}"
+        data-scale="log">
+    <p class="small text-muted mb-0">Type a value, tap +/−, or use the coarse slider.</p>
+    {% else %}
+    <!-- Standard range slider for modest value spans -->
+    <input type="range" class="form-range" id="{{ setting.id }}"
+        min="{{ setting.min }}" max="{{ setting.max }}" step="{{ setting.step }}"
+        value="{{ current }}"
+        data-original-step="{{ setting.step }}"
+        data-min="{{ setting.min }}"
+        data-max="{{ setting.max }}"
+        {% if setting.conversion and setting.conversion.enabled %}
+            data-conversion-enabled="true"
+            data-conversion-factor="{{ setting.conversion.factor }}"
+            {% if setting.conversion.step %}
+                data-conversion-step="{{ setting.conversion.step }}"
+            {% endif %}
         {% endif %}
+        onchange="adjustSliderSetting('{{ setting.id }}', this.value)">
     {% endif %}
-    onchange="adjustSliderSetting('{{ setting.id }}', this.value)">
 
     <!-- Conversion Switch -->
     {% if setting.conversion and setting.conversion.enabled %}
