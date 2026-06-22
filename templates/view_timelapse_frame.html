@@ -1,0 +1,56 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<div class="d-flex flex-column align-items-center justify-content-center">
+    <div class="d-flex justify-content-center align-items-center flex-grow-1 w-100">
+        <img id="imageView"
+             src="{{ url_for('static', filename='gallery/timelapses/' + session_id + '/' + filename) }}"
+             alt="{{ filename }}" class="img-fluid rounded shadow-lg"
+             style="max-height: 80vh; max-width: 95vw; object-fit: contain;">
+    </div>
+</div>
+
+<div class="fixed-bottom bg-dark text-center p-3" style="height: 60px;">
+    <button class="btn btn-light mx-2" onclick="toggleFullscreen()">
+        <i class="bi bi-arrows-fullscreen"></i> Fullscreen
+    </button>
+    <button class="btn btn-light mx-2" onclick="location.href='{{ url_for('timelapse_session_gallery', session_id=session_id) }}'">
+        <i class="bi bi-collection-play"></i> Session
+    </button>
+    <button class="btn btn-light mx-2" onclick="location.href='{{ url_for('timelapse_gallery') }}'">
+        <i class="bi bi-camera-reels"></i> Timelapses
+    </button>
+    <button class="btn btn-light mx-2" onclick="location.href='{{ url_for('image_gallery') }}'">
+        <i class="bi bi-images"></i> Still Images
+    </button>
+</div>
+
+<script>
+function toggleFullscreen() {
+    let elem = document.getElementById("imageView");
+
+    if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+        if (elem.requestFullscreen) {
+            elem.requestFullscreen();
+        } else if (elem.webkitRequestFullscreen) {
+            elem.webkitRequestFullscreen();
+        }
+        elem.addEventListener("click", exitFullscreen);
+    } else {
+        exitFullscreen();
+    }
+}
+
+function exitFullscreen() {
+    if (document.fullscreenElement || document.webkitFullscreenElement) {
+        if (document.exitFullscreen) {
+            document.exitFullscreen();
+        } else if (document.webkitExitFullscreen) {
+            document.webkitExitFullscreen();
+        }
+    }
+    document.getElementById("imageView").removeEventListener("click", exitFullscreen);
+}
+</script>
+
+{% endblock %}

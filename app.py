@@ -7,7 +7,7 @@ import argparse
 import importlib.util
 
 # Flask imports
-from flask import Flask, render_template, request, jsonify, Response, send_file, abort, session, redirect, url_for
+from flask import Flask, render_template, request, jsonify, Response, send_file, abort, session, redirect, url_for, after_this_request
 import secrets
 
 # picamera2 imports
@@ -25,6 +25,7 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageOps
 from werkzeug.utils import secure_filename
 
 from timelapse import TimelapseManager
+from timelapse_export import create_timelapse_zip, create_timelapse_video, ffmpeg_available
 
 # Plugin hooks registry
 global plugin_hooks
@@ -1556,6 +1557,8 @@ for connected_camera in currently_connected_cameras:
 for key, camera in cameras.items():
     print(f"Key: {key}, Camera: {camera.camera_info}")
 
+timelapse_manager.reconcile_disk_sessions(timelapse_root)
+
 
 ####################
 # WebUI routes 
@@ -2089,17 +2092,28 @@ def is_timelapse_session_active(session_id):
             return True
     return False
 
+def refresh_timelapse_sessions():
+    timelapse_manager.reconcile_disk_sessions(timelapse_root)
+    return image_gallery_manager.list_timelapse_sessions()
+
 def annotate_timelapse_sessions(sessions):
     for session in sessions:
-        session["can_delete"] = not is_timelapse_session_active(session["session_id"])
+        session["is_active"] = is_timelapse_session_active(session["session_id"])
+        session["can_delete"] = not session["is_active"]
     return sessions
+
+def timelapse_export_context(session_info):
+    return {
+        "can_export": session_info.get("frame_count", 0) > 0,
+        "ffmpeg_available": ffmpeg_available(),
+    }
 
 @app.route('/image_gallery')
 def image_gallery():
     page = request.args.get('page', 1, type=int)
     images, total_pages = image_gallery_manager.paginate_images(page)
     cameras_data = [(camera_num, camera) for camera_num, camera in cameras.items()]
-    timelapse_count = len(image_gallery_manager.list_timelapse_sessions())
+    timelapse_count = len(refresh_timelapse_sessions())
     if not images:
         return render_template(
             'image_gallery.html',
@@ -2152,7 +2166,7 @@ def get_image_for_page():
 @app.route('/timelapse_gallery')
 def timelapse_gallery():
     page = request.args.get('page', 1, type=int)
-    sessions = annotate_timelapse_sessions(image_gallery_manager.list_timelapse_sessions())
+    sessions = annotate_timelapse_sessions(refresh_timelapse_sessions())
     cameras_data = [(camera_num, camera) for camera_num, camera in cameras.items()]
     items_per_page = image_gallery_manager.items_per_page
     total_pages = max((len(sessions) + items_per_page - 1) // items_per_page, 1)
@@ -2178,11 +2192,13 @@ def timelapse_gallery():
 @app.route('/timelapse_gallery/<session_id>')
 def timelapse_session_gallery(session_id):
     safe_session_id = secure_filename(session_id)
+    refresh_timelapse_sessions()
     session_info, first_frame, last_frame = image_gallery_manager.get_timelapse_session_summary(safe_session_id)
     cameras_data = [(camera_num, camera) for camera_num, camera in cameras.items()]
     if session_info is None:
         abort(404)
     session_info["can_delete"] = not is_timelapse_session_active(safe_session_id)
+    session_info["is_active"] = is_timelapse_session_active(safe_session_id)
     return render_template(
         'timelapse_session.html',
         session=session_info,
@@ -2190,17 +2206,20 @@ def timelapse_session_gallery(session_id):
         last_frame=last_frame,
         cameras_data=cameras_data,
         active_page='image_gallery',
+        **timelapse_export_context(session_info),
     )
 
 @app.route('/timelapse_gallery/<session_id>/frames')
 def timelapse_session_frames(session_id):
     safe_session_id = secure_filename(session_id)
     page = request.args.get('page', 1, type=int)
+    refresh_timelapse_sessions()
     session_info, frames, total_pages = image_gallery_manager.paginate_timelapse_frames(safe_session_id, page)
     cameras_data = [(camera_num, camera) for camera_num, camera in cameras.items()]
     if session_info is None:
         abort(404)
     session_info["can_delete"] = not is_timelapse_session_active(safe_session_id)
+    session_info["is_active"] = is_timelapse_session_active(safe_session_id)
     start_page = max(1, page - 2)
     end_page = min(total_pages, page + 2)
     return render_template(
@@ -2213,6 +2232,7 @@ def timelapse_session_frames(session_id):
         end_page=end_page,
         cameras_data=cameras_data,
         active_page='image_gallery',
+        **timelapse_export_context(session_info),
     )
 
 @app.route('/view_timelapse/<session_id>/<filename>')
@@ -2247,6 +2267,52 @@ def delete_timelapse(session_id):
     if success:
         return jsonify({"success": True, "message": message}), 200
     return jsonify({"success": False, "message": message}), 404
+
+@app.route('/download_timelapse_zip/<session_id>')
+def download_timelapse_zip(session_id):
+    safe_session_id = secure_filename(session_id)
+    session_dir = image_gallery_manager._valid_timelapse_session_dir(safe_session_id)
+    if not session_dir:
+        abort(404)
+
+    zip_path, error = create_timelapse_zip(session_dir)
+    if error:
+        return jsonify({"error": error}), 400
+
+    meta = image_gallery_manager._load_timelapse_session_meta(session_dir, safe_session_id)
+    session_name = meta.get("settings", {}).get("session_name") or safe_session_id
+    download_name = secure_filename(f"{session_name}_{safe_session_id}.zip")
+    if not download_name:
+        download_name = f"{safe_session_id}.zip"
+
+    @after_this_request
+    def cleanup(response):
+        try:
+            os.remove(zip_path)
+        except OSError:
+            pass
+        return response
+
+    return send_file(zip_path, as_attachment=True, download_name=download_name)
+
+@app.route('/download_timelapse_video/<session_id>')
+def download_timelapse_video(session_id):
+    safe_session_id = secure_filename(session_id)
+    session_dir = image_gallery_manager._valid_timelapse_session_dir(safe_session_id)
+    if not session_dir:
+        abort(404)
+
+    video_path, error = create_timelapse_video(session_dir)
+    if error:
+        return jsonify({"error": error}), 400
+
+    meta = image_gallery_manager._load_timelapse_session_meta(session_dir, safe_session_id)
+    session_name = meta.get("settings", {}).get("session_name") or safe_session_id
+    download_name = secure_filename(f"{session_name}.mp4")
+    if not download_name:
+        download_name = f"{safe_session_id}.mp4"
+
+    return send_file(video_path, as_attachment=True, download_name=download_name)
     
 @app.route('/view_image/<filename>')
 def view_image(filename):

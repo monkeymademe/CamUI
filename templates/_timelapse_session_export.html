@@ -1,0 +1,21 @@
+{% if can_export %}
+<div class="btn-group" role="group" aria-label="Export timelapse">
+    <a href="{{ url_for('download_timelapse_zip', session_id=session['session_id']) }}"
+       class="btn btn-sm btn-outline-secondary"
+       data-bs-toggle="tooltip" data-bs-title="Download all frames as a ZIP">
+        <i class="bi bi-file-earmark-zip"></i> Download ZIP
+    </a>
+    {% if ffmpeg_available %}
+    <a href="{{ url_for('download_timelapse_video', session_id=session['session_id']) }}"
+       class="btn btn-sm btn-outline-secondary"
+       data-bs-toggle="tooltip" data-bs-title="Export as MP4 video (may take a moment)">
+        <i class="bi bi-camera-reels"></i> Export video
+    </a>
+    {% else %}
+    <button type="button" class="btn btn-sm btn-outline-secondary" disabled
+            data-bs-toggle="tooltip" data-bs-title="ffmpeg is required for video export">
+        <i class="bi bi-camera-reels"></i> Export video
+    </button>
+    {% endif %}
+</div>
+{% endif %}

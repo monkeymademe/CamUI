@@ -51,13 +51,62 @@ class TimelapseManager:
         if session is None:
             return False
         if session.status in ("running", "stopping"):
-            if session._thread and not session._thread.is_alive():
-                session.status = "error"
+            if session._thread is None or not session._thread.is_alive():
+                session.status = "stopped"
                 session.last_error = session.last_error or "Timelapse worker stopped unexpectedly"
                 session.save_metadata()
+                with self._lock:
+                    self._sessions.pop(camera_num, None)
                 return False
             return True
         return False
+
+    def get_active_session_ids(self):
+        with self._lock:
+            return {
+                session.session_id
+                for session in self._sessions.values()
+                if session.status in ("running", "stopping")
+                and session._thread
+                and session._thread.is_alive()
+            }
+
+    def reconcile_disk_sessions(self, timelapse_root):
+        """Mark on-disk running/stopping sessions as stopped when no worker is active."""
+        if not os.path.isdir(timelapse_root):
+            return
+
+        active_ids = self.get_active_session_ids()
+        for entry in os.listdir(timelapse_root):
+            session_dir = os.path.join(timelapse_root, entry)
+            session_json = os.path.join(session_dir, "session.json")
+            if not os.path.isdir(session_dir) or not os.path.isfile(session_json):
+                continue
+            try:
+                with open(session_json, encoding="utf-8") as f:
+                    meta = json.load(f)
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"Error reading {session_json}: {e}")
+                continue
+
+            if meta.get("status") not in ("running", "stopping"):
+                continue
+
+            session_id = meta.get("session_id", entry)
+            if session_id in active_ids:
+                continue
+
+            meta["status"] = "stopped"
+            meta["last_error"] = (
+                meta.get("last_error")
+                or "Session interrupted (app restarted or worker stopped)"
+            )
+            try:
+                with open(session_json, "w", encoding="utf-8") as f:
+                    json.dump(meta, f, indent=2)
+                print(f"Reconciled orphaned timelapse session: {session_id}")
+            except OSError as e:
+                print(f"Error updating {session_json}: {e}")
 
     def start(self, camera, settings, timelapse_root):
         camera_num = camera.camera_info["Num"]

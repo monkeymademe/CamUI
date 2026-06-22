@@ -1,0 +1,20 @@
+<!-- Delete Confirmation Modal -->
+<div class="modal fade" id="deleteTimelapseModal" tabindex="-1" aria-labelledby="deleteTimelapseModalLabel" aria-hidden="true"
+     {% if remove_card_on_delete %}data-remove-card="true"{% endif %}
+     {% if redirect_after_delete %}data-redirect-url="{{ redirect_after_delete }}"{% endif %}>
+    <div class="modal-dialog" role="document">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="deleteTimelapseModalLabel">Confirm Deletion</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                Delete timelapse <strong id="deleteTimelapseName"></strong> and all its frames? This cannot be undone.
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-danger" id="confirmDeleteTimelapseButton">Delete</button>
+            </div>
+        </div>
+    </div>
+</div>

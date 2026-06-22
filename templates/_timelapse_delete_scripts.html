@@ -1,0 +1,87 @@
+<script>
+(function () {
+    function initTimelapseDelete() {
+        const modalEl = document.getElementById("deleteTimelapseModal");
+        const confirmBtn = document.getElementById("confirmDeleteTimelapseButton");
+        const nameEl = document.getElementById("deleteTimelapseName");
+        if (!modalEl || !confirmBtn || !nameEl) {
+            return;
+        }
+
+        const removeCardOnDelete = modalEl.dataset.removeCard === "true";
+        const redirectUrl = modalEl.dataset.redirectUrl || "";
+
+        function openDeleteTimelapseModal(sessionId, sessionName) {
+            nameEl.textContent = sessionName;
+            confirmBtn.dataset.sessionId = sessionId;
+            bootstrap.Modal.getOrCreateInstance(modalEl).show();
+        }
+
+        document.addEventListener("click", function (event) {
+            const deleteBtn = event.target.closest(".delete-timelapse-btn");
+            if (!deleteBtn || deleteBtn.disabled) {
+                return;
+            }
+            event.preventDefault();
+            openDeleteTimelapseModal(
+                deleteBtn.dataset.sessionId,
+                deleteBtn.dataset.sessionName || deleteBtn.dataset.sessionId
+            );
+        });
+
+        confirmBtn.addEventListener("click", function () {
+            const sessionId = confirmBtn.dataset.sessionId;
+            if (!sessionId) {
+                return;
+            }
+
+            confirmBtn.disabled = true;
+
+            fetch("/delete_timelapse/" + encodeURIComponent(sessionId), { method: "DELETE" })
+                .then(function (response) {
+                    return response.json().then(function (data) {
+                        return { ok: response.ok, data: data };
+                    });
+                })
+                .then(function (result) {
+                    if (!result.ok) {
+                        throw new Error(result.data.message || "Delete failed");
+                    }
+
+                    const modalInstance = bootstrap.Modal.getInstance(modalEl);
+                    if (modalInstance) {
+                        modalInstance.hide();
+                    }
+
+                    if (removeCardOnDelete) {
+                        const card = document.getElementById("card_" + sessionId);
+                        if (card) {
+                            card.remove();
+                        }
+                        const gallery = document.getElementById("timelapse-gallery");
+                        if (gallery && !gallery.children.length) {
+                            window.location.reload();
+                        }
+                        return;
+                    }
+
+                    if (redirectUrl) {
+                        window.location.href = redirectUrl;
+                    }
+                })
+                .catch(function (error) {
+                    alert(error.message || "Failed to delete timelapse");
+                })
+                .finally(function () {
+                    confirmBtn.disabled = false;
+                });
+        });
+    }
+
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", initTimelapseDelete);
+    } else {
+        initTimelapseDelete();
+    }
+})();
+</script>

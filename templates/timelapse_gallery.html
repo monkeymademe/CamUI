@@ -5,24 +5,8 @@
 <div class="container-xxl">
     <div class="row">
         <div>
-            <!-- Delete Confirmation Modal -->
-            <div class="modal fade" id="deleteTimelapseModal" tabindex="-1" role="dialog" aria-labelledby="deleteTimelapseModalLabel" aria-hidden="true">
-                <div class="modal-dialog" role="document">
-                    <div class="modal-content">
-                        <div class="modal-header">
-                            <h5 class="modal-title" id="deleteTimelapseModalLabel">Confirm Deletion</h5>
-                            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                        </div>
-                        <div class="modal-body">
-                            Delete timelapse <strong id="deleteTimelapseName"></strong> and all its frames? This cannot be undone.
-                        </div>
-                        <div class="modal-footer">
-                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                            <button type="button" class="btn btn-danger" id="confirmDeleteTimelapseButton">Delete</button>
-                        </div>
-                    </div>
-                </div>
-            </div>
+            {% set remove_card_on_delete = true %}
+            {% include '_timelapse_delete_modal.html' %}
 
             <div class="container">
                 <div class="d-flex justify-content-between align-items-center mb-3">
@@ -52,9 +36,9 @@
                                     <i class="bi bi-camera-reels fs-1"></i>
                                 </div>
                                 {% endif %}
-                                {% if session['status'] == 'running' %}
+                                {% if session.get('is_active') %}
                                 <span class="badge rounded-pill text-bg-success position-absolute top-0 end-0 m-2">Recording</span>
-                                {% elif session['status'] == 'completed' %}
+                                {% elif session['status'] == 'complete' %}
                                 <span class="badge rounded-pill text-bg-primary position-absolute top-0 end-0 m-2">Completed</span>
                                 {% elif session['status'] == 'stopped' %}
                                 <span class="badge rounded-pill text-bg-warning position-absolute top-0 end-0 m-2">Stopped</span>
@@ -75,9 +59,10 @@
                                         View session
                                     </a>
                                     {% if session['can_delete'] %}
-                                    <button type="button" class="btn btn-sm btn-outline-danger"
-                                            onclick="openDeleteTimelapseModal({{ session['session_id']|tojson }}, {{ session['session_name']|tojson }})"
-                                            data-bs-toggle="tooltip" data-bs-title="Delete timelapse">
+                                    <button type="button" class="btn btn-sm btn-outline-danger delete-timelapse-btn"
+                                            data-session-id="{{ session['session_id'] }}"
+                                            data-session-name="{{ session['session_name'] }}"
+                                            title="Delete timelapse">
                                         <i class="bi bi-trash"></i>
                                     </button>
                                     {% else %}
@@ -129,42 +114,8 @@
 </footer>
 {% endif %}
 
-<script>
-    function openDeleteTimelapseModal(sessionId, sessionName) {
-        const modal = new bootstrap.Modal(document.getElementById('deleteTimelapseModal'));
-        document.getElementById('deleteTimelapseName').textContent = sessionName;
-        document.getElementById('confirmDeleteTimelapseButton').setAttribute('data-session-id', sessionId);
-        modal.show();
-    }
+{% endblock %}
 
-    document.getElementById('confirmDeleteTimelapseButton').addEventListener('click', function () {
-        const sessionId = this.getAttribute('data-session-id');
-        const confirmButton = this;
-
-        fetch(`/delete_timelapse/${encodeURIComponent(sessionId)}`, { method: 'DELETE' })
-            .then(response => response.json().then(data => ({ ok: response.ok, data })))
-            .then(({ ok, data }) => {
-                if (!ok) throw new Error(data.message || 'Delete failed');
-
-                const card = document.getElementById(`card_${sessionId}`);
-                if (card) card.remove();
-
-                const gallery = document.getElementById('timelapse-gallery');
-                if (!gallery.children.length) {
-                    window.location.reload();
-                }
-
-                const modalElement = document.getElementById('deleteTimelapseModal');
-                const modalInstance = bootstrap.Modal.getInstance(modalElement);
-                if (modalInstance) {
-                    modalInstance.hide();
-                    confirmButton.blur();
-                }
-            })
-            .catch(error => {
-                alert(error.message || 'Failed to delete timelapse');
-            });
-    });
-</script>
-
+{% block scripts %}
+{% include '_timelapse_delete_scripts.html' %}
 {% endblock %}
