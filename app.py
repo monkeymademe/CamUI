@@ -43,6 +43,14 @@ AEC_CHILD_SETTINGS = {
 
 VALID_ROTATION_ANGLES = {0, 90, 180, 270}
 
+def camui_log(message):
+    """Print safely inside WSGI stream generators (avoids latin-1 stdout UnicodeEncodeError)."""
+    text = str(message)
+    try:
+        print(text)
+    except UnicodeEncodeError:
+        print(text.encode("ascii", "replace").decode("ascii"))
+
 # Helper to ensure file path is within the intended directory
 def is_safe_path(basedir, path):
     return os.path.realpath(path).startswith(os.path.realpath(basedir))
@@ -994,7 +1002,7 @@ class CameraObject:
                 rotated.save(buf, format="JPEG", quality=85)
                 return buf.getvalue()
         except Exception as e:
-            print(f"⚠️ Frame rotation failed: {e}")
+            camui_log(f"Frame rotation failed: {e}")
             return jpeg_bytes
 
     def apply_rotation_to_file(self, image_path):
@@ -1275,7 +1283,7 @@ class CameraObject:
                 self.picam2.capture_array("main")
                 time.sleep(delay)
             except Exception as e:
-                print(f"⚠️ Flush error: {e}")
+                camui_log(f"Flush error: {e}")
                 break
 
     def generate_stream(self):
@@ -1291,10 +1299,10 @@ class CameraObject:
                     with self.output.condition:
                         notified = self.output.condition.wait(timeout=5.0)
                         if not notified:
-                            print("⚠️ Timed out waiting for frame.")
+                            camui_log("Timed out waiting for frame.")
                             consecutive_timeouts += 1
                             if consecutive_timeouts >= max_timeouts:
-                                print("⚠️ Too many consecutive timeouts, attempting stream recovery...")
+                                camui_log("Too many consecutive timeouts, attempting stream recovery...")
                                 self.safe_restart_stream()
                                 consecutive_timeouts = 0
                                 continue
@@ -1304,7 +1312,7 @@ class CameraObject:
                             frame = self.output.read_frame()
 
                 if frame is None or not isinstance(frame, bytes):
-                    print(f"⚠️ Invalid frame ({type(frame)}), using placeholder.")
+                    camui_log(f"Invalid frame ({type(frame)}), using placeholder.")
                     frame = self.placeholder_frame
                     continue
 
@@ -1315,7 +1323,7 @@ class CameraObject:
                         frame = self.placeholder_frame
                         continue
                 except Exception as e:
-                    print(f"⚠️ Error getting camera config: {e}")
+                    camui_log(f"Error getting camera config: {e}")
                     frame = self.placeholder_frame
                     continue
 
@@ -1335,9 +1343,10 @@ class CameraObject:
 
                 frames_since_start += 1
                 if (not self._did_runtime_ae_enable_sync) and frames_since_start >= 8:
-                    out = self.apply_exposure_now()
+                    if self._aec_should_be_enabled():
+                        out = self.apply_exposure_now()
+                        camui_log(f"Runtime AEC-AGC sync result: {out}")
                     self._did_runtime_ae_enable_sync = True
-                    print(f"Runtime AEC-AGC sync result: {out}")
 
                 frame = self.apply_frame_rotation(frame)
 
@@ -1345,14 +1354,14 @@ class CameraObject:
                        b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
             except Exception as e:
-                print(f"🚨 Stream loop error: {e}")
+                camui_log(f"Stream loop error: {e}")
                 traceback.print_exc()
                 time.sleep(0.1)  # Prevent tight loop on error
                 continue
 
     def safe_restart_stream(self):
         try:
-            print("🔄 Restarting stream with correct config...")
+            camui_log("Restarting stream with correct config...")
             self.use_placeholder = True
             self.stop_streaming()
             self.picam2.stop()
@@ -1361,9 +1370,9 @@ class CameraObject:
             self.start_streaming()
             self.flush_frames()
             self.use_placeholder = False
-            print("✅ Stream restarted and flushed.")
+            camui_log("Stream restarted and flushed.")
         except Exception as e:
-            print(f"🚨 Failed to restart stream: {e}")
+            camui_log(f"Failed to restart stream: {e}")
             traceback.print_exc()
             self.use_placeholder = True  # Keep using placeholder if restart fails
 
