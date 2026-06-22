@@ -46,7 +46,7 @@
                 <div class="accordion-body">
                     
                     <!-- Loop through settings within a section -->
-                    {% for setting in section.settings if setting.enabled %}
+                    {% for setting in section.settings if setting.enabled and (setting.id != 'rotation' or software_rotation_enabled) %}
                     
                         <!-- Include setting-specific template dynamically -->
                         {% include "settings/" + setting.type + ".html" %}
@@ -279,21 +279,31 @@ function fetchCameraProfile() {
 function updateUIFromCameraProfile(cameraProfile) {
     console.log("Updating UI from camera profile:", cameraProfile);
 
-    // Manually update hflip, vflip
-    const manualKeys = ["hflip", "vflip", "saveRAW"];
+    // Manually update top-level profile settings
+    const manualKeys = ["hflip", "vflip", "rotation", "saveRAW"];
     manualKeys.forEach(key => {
-        let element = document.getElementById(key);
-        if (element) {
-            if (element.type === "checkbox") {
-                element.checked = cameraProfile[key];
-                console.log(`Set ${key} (checkbox) to:`, element.checked);
-            } else {
-                element.value = cameraProfile[key];
-                console.log(`Set ${key} (input) to:`, element.value);
-            }
-        } else {
-            console.warn(`Element with ID '${key}' not found.`);
+        if (cameraProfile[key] === undefined) {
+            return;
         }
+        const value = cameraProfile[key];
+        const checkbox = document.getElementById(key);
+        if (checkbox && checkbox.type === "checkbox") {
+            checkbox.checked = Boolean(value);
+            console.log(`Set ${key} (checkbox) to:`, checkbox.checked);
+            return;
+        }
+        const radioElement = document.querySelector(`input[name="${key}"][value="${value}"]`);
+        if (radioElement) {
+            radioElement.checked = true;
+            console.log(`Set ${key} (radio) to: ${value}`);
+            return;
+        }
+        if (checkbox) {
+            checkbox.value = value;
+            console.log(`Set ${key} (input) to:`, checkbox.value);
+            return;
+        }
+        console.warn(`Element for '${key}' not found.`);
     });
 
     // Update sensor mode (radio buttons)

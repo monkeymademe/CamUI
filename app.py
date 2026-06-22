@@ -41,6 +41,8 @@ AEC_CHILD_SETTINGS = {
     "AeMeteringMode",
 }
 
+VALID_ROTATION_ANGLES = {0, 90, 180, 270}
+
 # Helper to ensure file path is within the intended directory
 def is_safe_path(basedir, path):
     return os.path.realpath(path).startswith(os.path.realpath(basedir))
@@ -127,6 +129,12 @@ minimum_last_config = {
     "cameras": []
 }
 
+DEFAULT_APP_SETTINGS = {
+    "software_rotation_enabled": False,
+}
+
+app_settings_path = os.path.join(current_dir, 'camui_settings.json')
+
 # Load the camera-module-info.json file
 last_config_file_path = os.path.join(current_dir, 'camera-last-config.json')
 
@@ -181,6 +189,18 @@ def control_template():
 
 # Load or initialize the configuration
 camera_last_config = load_or_initialize_config(last_config_file_path, minimum_last_config)
+app_settings = load_or_initialize_config(app_settings_path, DEFAULT_APP_SETTINGS.copy())
+
+def save_app_settings():
+    with open(app_settings_path, 'w') as file:
+        json.dump(app_settings, file, indent=4)
+
+def is_software_rotation_enabled():
+    return bool(app_settings.get("software_rotation_enabled", False))
+
+@app.context_processor
+def inject_app_settings():
+    return {"software_rotation_enabled": is_software_rotation_enabled()}
 
 def get_camera_info(camera_model, camera_module_info):
     return next(
@@ -359,6 +379,7 @@ class CameraObject:
             self.set_orientation()
             self.update_settings('hflip', self.camera_profile['hflip'])
             self.update_settings('vflip', self.camera_profile['vflip'])
+            self.update_settings('rotation', self.camera_profile.get('rotation', 0))
             self.update_settings('saveRAW', self.camera_profile['saveRAW'])
             self.apply_profile_controls()
             self.sync_live_controls()  # Ensure UI updates with the latest settings
@@ -397,6 +418,7 @@ class CameraObject:
             self.camera_profile = {
                 "hflip": 0,
                 "vflip": 0,
+                "rotation": 0,
                 "sensor_mode": 0,
                 "live_preview": True,
                 "model": self.camera_info.get("Model", "Unknown"),
@@ -550,6 +572,15 @@ class CameraObject:
                 print(f"Applied transform: {setting_id} -> {setting_value} (Camera restarted)")
             except ValueError as e:
                 print(f"⚠️ Error: {e}")
+        elif setting_id == "rotation":
+            try:
+                angle = int(setting_value) % 360
+                if angle not in VALID_ROTATION_ANGLES:
+                    angle = 0
+                self.camera_profile["rotation"] = angle
+                print(f"Applied stream rotation: {angle}°")
+            except ValueError as e:
+                print(f"⚠️ Error: {e}")
         elif setting_id in ["StillCaptureResolution", "LiveFeedResolution"]:
             try:
                 self.camera_profile['resolutions'][setting_id] = int(setting_value)
@@ -606,10 +637,13 @@ class CameraObject:
 
     def sync_live_controls(self):
         # Updates self.live_controls to match self.camera_profile without resetting defaults.
+        top_level_keys = ("hflip", "vflip", "rotation", "saveRAW")
         for section in self.live_controls.get("sections", []):
             for setting in section.get("settings", []):
                 setting_id = setting["id"]
-                if setting_id in self.camera_profile["controls"]:
+                if setting_id in top_level_keys and setting_id in self.camera_profile:
+                    setting["value"] = self.camera_profile[setting_id]
+                elif setting_id in self.camera_profile["controls"]:
                     setting["value"] = self.camera_profile["controls"][setting_id]
                 # Sync child settings
                 for child in setting.get("childsettings", []):
@@ -668,6 +702,39 @@ class CameraObject:
         self.still_config['transform'] = transform
         self.video_config['transform'] = transform
         print("Applied Orientation - hflip:", transform.hflip, "vflip:", transform.vflip)
+
+    def get_rotation(self):
+        if not is_software_rotation_enabled():
+            return 0
+        angle = int(self.camera_profile.get("rotation", 0)) % 360
+        return angle if angle in VALID_ROTATION_ANGLES else 0
+
+    def apply_frame_rotation(self, jpeg_bytes):
+        rotation = self.get_rotation()
+        if rotation == 0 or not jpeg_bytes:
+            return jpeg_bytes
+        try:
+            with Image.open(io.BytesIO(jpeg_bytes)) as img:
+                img = img.convert("RGB")
+                rotated = img.rotate(-rotation, expand=True, resample=Image.BILINEAR)
+                buf = io.BytesIO()
+                rotated.save(buf, format="JPEG", quality=85)
+                return buf.getvalue()
+        except Exception as e:
+            print(f"⚠️ Frame rotation failed: {e}")
+            return jpeg_bytes
+
+    def apply_rotation_to_file(self, image_path):
+        rotation = self.get_rotation()
+        if rotation == 0 or not os.path.isfile(image_path):
+            return
+        try:
+            with Image.open(image_path) as img:
+                img = ImageOps.exif_transpose(img.convert("RGB"))
+                img = img.rotate(-rotation, expand=True, resample=Image.BILINEAR)
+                img.save(image_path, format="JPEG", quality=95)
+        except Exception as e:
+            print(f"⚠️ Image rotation failed for {image_path}: {e}")
     
     def set_sensor_mode(self, mode_index):
         try:
@@ -849,6 +916,7 @@ class CameraObject:
         self.camera_profile = {
             "hflip": 0,
             "vflip": 0,
+            "rotation": 0,
             "sensor_mode": 0,
             "live_preview": True,
             "model": self.camera_info.get("Model", "Unknown"),
@@ -1010,6 +1078,8 @@ class CameraObject:
                     self._did_runtime_ae_enable_sync = True
                     print(f"Runtime AEC-AGC sync result: {out}")
 
+                frame = self.apply_frame_rotation(frame)
+
                 yield (b'--frame\r\n'
                        b'Content-Type: image/jpeg\r\n\r\n' + frame + b'\r\n')
 
@@ -1088,6 +1158,8 @@ class CameraObject:
             if not os.path.isfile(image_path):
                 raise IOError(f"Timelapse frame not written: {image_path}")
 
+            self.apply_rotation_to_file(image_path)
+
             print(f"Timelapse frame saved: {image_path}")
             for hook in plugin_hooks.get("after_image_capture", []):
                 try:
@@ -1116,6 +1188,8 @@ class CameraObject:
             if self.camera_profile["saveRAW"]:
                 self.picam2.helpers.save_dng(buffers[1], metadata, self.still_config["raw"], f"{filepath}.dng")
             
+            self.apply_rotation_to_file(f"{filepath}.jpg")
+
             # Switch to still mode and capture the image
             #self.picam2.switch_mode_and_capture_file(self.still_config, f"{filepath}.jpg")
             print(f"Image captured successfully. Path: {filepath}")
@@ -1141,6 +1215,7 @@ class CameraObject:
             request = self.picam2.capture_request()
             request.save("main", f'{filepath}.jpg')
             request.release()
+            self.apply_rotation_to_file(f'{filepath}.jpg')
             print(f"Image captured successfully. Path: {filepath}")
             return f'{filepath}.jpg'
         except Exception as e:
@@ -1678,7 +1753,33 @@ def about():
 def system_settings():
     # Load camera module info
     print(camera_module_info)
-    return render_template('system_settings.html', firmware_control=firmware_control, camera_modules=camera_module_info.get("camera_modules", []))
+    return render_template(
+        'system_settings.html',
+        firmware_control=firmware_control,
+        camera_modules=camera_module_info.get("camera_modules", []),
+        software_rotation_enabled=is_software_rotation_enabled(),
+    )
+
+@app.route('/update_system_setting', methods=['POST'])
+def update_system_setting():
+    data = request.get_json(silent=True) or {}
+    setting_id = data.get('id')
+    setting_value = data.get('value')
+
+    if setting_id != 'software_rotation_enabled':
+        return jsonify({"success": False, "error": "Unknown setting"}), 400
+
+    try:
+        if isinstance(setting_value, bool):
+            enabled = setting_value
+        else:
+            enabled = bool(int(setting_value))
+        app_settings['software_rotation_enabled'] = enabled
+        save_app_settings()
+        print(f"Software rotation {'enabled' if enabled else 'disabled'}")
+        return jsonify({"success": True, "software_rotation_enabled": enabled})
+    except (TypeError, ValueError) as e:
+        return jsonify({"success": False, "error": str(e)}), 400
 
 @app.route('/set_camera_config', methods=['POST'])
 def set_camera_config():

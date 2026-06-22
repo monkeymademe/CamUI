@@ -19,6 +19,29 @@
     </div>
   </div>
 
+  <!-- Stream rotation (software post-processing) -->
+  <div class="mb-5">
+    <h2 class="pb-2 mb-4 border-bottom">Stream Rotation</h2>
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <p class="text-muted">
+          Software rotation decodes and re-encodes each live-stream frame, which adds CPU load on the Pi.
+          Leave this off unless your camera is mounted sideways and you need 90° or 270° correction.
+          When enabled, choose the rotation angle in each camera's <strong>Orientation</strong> settings.
+        </p>
+        <div class="form-check form-switch">
+          <input class="form-check-input" type="checkbox" role="switch" id="softwareRotationToggle"
+            {% if software_rotation_enabled %}checked{% endif %}
+            onchange="toggleSoftwareRotation(this.checked)">
+          <label class="form-check-label" for="softwareRotationToggle">
+            Enable software stream rotation
+          </label>
+        </div>
+        <div id="softwareRotationAlert" class="alert mt-3 mb-0 d-none" role="alert"></div>
+      </div>
+    </div>
+  </div>
+
   {% if firmware_control %}
   <!-- 2. Camera Modules Section -->
   <div>
@@ -74,6 +97,42 @@
 </div>
 
 <script>
+  function showSoftwareRotationAlert(type, message) {
+    const alert = document.getElementById("softwareRotationAlert");
+    alert.className = `alert alert-${type} mt-3 mb-0`;
+    alert.textContent = message;
+    alert.classList.remove("d-none");
+  }
+
+  function toggleSoftwareRotation(enabled) {
+    fetch('/update_system_setting', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: 'software_rotation_enabled',
+        value: enabled
+      })
+    })
+    .then(response => response.json())
+    .then(data => {
+      if (data.success) {
+        showSoftwareRotationAlert(
+          'success',
+          data.software_rotation_enabled
+            ? 'Software rotation enabled. Set the angle under Camera Settings → Orientation.'
+            : 'Software rotation disabled. Stream rotation processing is now off.'
+        );
+      } else {
+        document.getElementById('softwareRotationToggle').checked = !enabled;
+        showSoftwareRotationAlert('danger', data.error || 'Failed to update setting.');
+      }
+    })
+    .catch(error => {
+      document.getElementById('softwareRotationToggle').checked = !enabled;
+      showSoftwareRotationAlert('danger', 'Request failed: ' + error);
+    });
+  }
+
   let currentAction = null;
 
   function showCameraModal(sensorModel, moduleName) {

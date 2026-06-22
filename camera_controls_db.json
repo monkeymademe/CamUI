@@ -20,6 +20,21 @@
           "label": "Vertical Flip",
           "enabled": true,
           "default": false
+        },
+        {
+          "name": "Stream Rotation",
+          "id": "rotation",
+          "info": "Rotate the live camera feed in software. Use 90° or 270° when the camera module is mounted in portrait orientation. Horizontal and vertical flip above are separate mirror transforms applied by the sensor.",
+          "type": "radio",
+          "enabled": true,
+          "default": 0,
+          "hr": true,
+          "options": [
+            { "value": 0, "label": "0° (none)", "enabled": true },
+            { "value": 90, "label": "90° clockwise", "enabled": true },
+            { "value": 180, "label": "180°", "enabled": true },
+            { "value": 270, "label": "90° counter-clockwise (270°)", "enabled": true }
+          ]
         }
       ]
     },
