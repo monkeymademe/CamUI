@@ -131,19 +131,26 @@ minimum_last_config = {
 
 DEFAULT_APP_SETTINGS = {
     "software_rotation_enabled": False,
+    "camera_module_info_mtime": None,
 }
 
 app_settings_path = os.path.join(current_dir, 'camui_settings.json')
+camera_module_info_path = os.path.join(current_dir, 'camera-module-info.json')
 
 # Load the camera-module-info.json file
 last_config_file_path = os.path.join(current_dir, 'camera-last-config.json')
 
-try:
-    with open(os.path.join(current_dir, 'camera-module-info.json'), 'r') as file:
-        camera_module_info = json.load(file)
-except (FileNotFoundError, json.JSONDecodeError) as e:
-    print(f"Error loading camera-module-info.json: {e}")
-    camera_module_info = {"camera_modules": []}
+def load_camera_module_info():
+    global camera_module_info
+    try:
+        with open(camera_module_info_path, 'r', encoding='utf-8') as file:
+            camera_module_info = json.load(file)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"Error loading camera-module-info.json: {e}")
+        camera_module_info = {"camera_modules": []}
+    return camera_module_info
+
+camera_module_info = load_camera_module_info()
 
 # Function to load or initialize configuration
 def load_or_initialize_config(file_path, default_config):
@@ -197,6 +204,117 @@ def save_app_settings():
 
 def is_software_rotation_enabled():
     return bool(app_settings.get("software_rotation_enabled", False))
+
+def save_camera_last_config(config):
+    with open(last_config_file_path, 'w') as file:
+        json.dump(config, file, indent=4)
+
+def update_camera_entry_in_last_config(camera_info):
+    try:
+        if os.path.exists(last_config_file_path):
+            with open(last_config_file_path, 'r', encoding='utf-8') as f:
+                last_config = json.load(f)
+        else:
+            last_config = {"cameras": []}
+
+        updated = False
+        for camera in last_config.get("cameras", []):
+            if camera.get("Num") == camera_info.get("Num"):
+                camera.update({
+                    "Num": camera_info.get("Num"),
+                    "Model": camera_info.get("Model"),
+                    "Is_Pi_Cam": camera_info.get("Is_Pi_Cam"),
+                    "Has_Config": camera_info.get("Has_Config"),
+                    "Config_Location": camera_info.get("Config_Location"),
+                })
+                updated = True
+                break
+
+        if not updated:
+            last_config.setdefault("cameras", []).append(dict(camera_info))
+
+        save_camera_last_config(last_config)
+        return last_config
+    except Exception as e:
+        print(f"Error updating camera-last-config.json: {e}")
+        return None
+
+def get_camera_module_info_mtime():
+    try:
+        return os.path.getmtime(camera_module_info_path)
+    except OSError:
+        return None
+
+def camera_module_info_changed_since_last_run():
+    current_mtime = get_camera_module_info_mtime()
+    if current_mtime is None:
+        return False
+
+    stored_mtime = app_settings.get("camera_module_info_mtime")
+    if stored_mtime is None:
+        app_settings["camera_module_info_mtime"] = current_mtime
+        save_app_settings()
+        return False
+
+    if current_mtime != stored_mtime:
+        print("camera-module-info.json changed since last run; invalidating saved camera profiles")
+        app_settings["camera_module_info_mtime"] = current_mtime
+        save_app_settings()
+        return True
+
+    return False
+
+def is_pi_camera_module(sensor_model):
+    matching_module = next(
+        (module for module in camera_module_info["camera_modules"]
+         if module["sensor_model"] == sensor_model),
+        None,
+    )
+    return bool(matching_module and matching_module.get("is_pi_cam", False) is True)
+
+def build_camera_info_from_detection(connected_camera):
+    is_pi_cam = is_pi_camera_module(connected_camera["Model"])
+    if is_pi_cam:
+        print(f"Connected camera model '{connected_camera['Model']}' is found in the camera-module-info.json and is a Pi Camera.\n")
+    else:
+        print(f"Connected camera model '{connected_camera['Model']}' is either NOT in the camera-module-info.json or is NOT a Pi Camera.\n")
+    return {
+        'Num': connected_camera['Num'],
+        'Model': connected_camera['Model'],
+        'Is_Pi_Cam': is_pi_cam,
+        'Has_Config': False,
+        'Config_Location': f"default_{connected_camera['Model']}.json",
+    }
+
+def should_invalidate_cached_camera(old_cam, new_cam):
+    return (
+        old_cam.get("Model") != new_cam.get("Model")
+        or old_cam.get("Is_Pi_Cam") != new_cam.get("Is_Pi_Cam")
+    )
+
+def profile_matches_camera(profile_data, camera_model):
+    profile_model = profile_data.get("model")
+    return not profile_model or profile_model == camera_model
+
+def merge_detected_cameras_with_cache(detected_cameras, cached_config, invalidate_saved_profiles=False):
+    existing_cameras_lookup = {cam["Num"]: cam for cam in cached_config.get("cameras", [])}
+    updated_cameras = []
+
+    for new_cam in detected_cameras:
+        cam_num = new_cam["Num"]
+        if cam_num in existing_cameras_lookup:
+            old_cam = existing_cameras_lookup[cam_num]
+            if invalidate_saved_profiles or should_invalidate_cached_camera(old_cam, new_cam):
+                reason = "camera-module-info.json changed" if invalidate_saved_profiles else "model or Pi Cam status changed"
+                print(f"Invalidating cached config for camera {cam_num} ({old_cam.get('Model')} -> {new_cam.get('Model')}): {reason}")
+                updated_cameras.append(new_cam)
+            else:
+                updated_cameras.append(old_cam)
+        else:
+            print(f"New camera added to config: {new_cam}")
+            updated_cameras.append(new_cam)
+
+    return updated_cameras
 
 @app.context_processor
 def inject_app_settings():
@@ -358,9 +476,46 @@ class CameraObject:
             self.use_placeholder = False
 
     def load_saved_camera_profile(self):
-        #Load the saved camera config if available.
-        if self.camera_info.get("Has_Config") and self.camera_info.get("Config_Location"):
-            self.load_camera_profile(self.camera_info["Config_Location"])
+        if not (self.camera_info.get("Has_Config") and self.camera_info.get("Config_Location")):
+            return
+
+        profile_path = os.path.join(camera_profile_folder, self.camera_info["Config_Location"])
+        if not os.path.exists(profile_path):
+            print(f"Saved profile missing: {self.camera_info['Config_Location']}; using defaults")
+            self.clear_saved_config_pointer()
+            return
+
+        try:
+            with open(profile_path, "r", encoding="utf-8") as f:
+                profile_data = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            print(f"Saved profile unreadable: {self.camera_info['Config_Location']} ({e}); using defaults")
+            self.clear_saved_config_pointer()
+            return
+
+        if not profile_matches_camera(profile_data, self.camera_info.get("Model")):
+            print(
+                f"Saved profile model mismatch ({profile_data.get('model')} != "
+                f"{self.camera_info.get('Model')}); using defaults"
+            )
+            self.clear_saved_config_pointer()
+            return
+
+        self.load_camera_profile(self.camera_info["Config_Location"])
+
+    def clear_saved_config_pointer(self):
+        self.camera_info["Has_Config"] = False
+        self.camera_info["Config_Location"] = f"default_{self.camera_info.get('Model', 'Unknown')}.json"
+        update_camera_entry_in_last_config(self.camera_info)
+
+    def reload_after_cache_clear(self):
+        load_camera_module_info()
+        self.camera_module_spec = self.get_camera_module_spec()
+        self.sensor_modes = self.picam2.sensor_modes
+        self.camera_resolutions = self.generate_camera_resolutions()
+        self.clear_saved_config_pointer()
+        self.reset_to_default()
+        self.sync_live_controls()
 
     def load_camera_profile(self, profile_filename):
         #Load and apply a camera profile from a given filename.
@@ -370,8 +525,16 @@ class CameraObject:
             print(f"\nProfile file not found: {profile_path}")
             return False
         try:
-            with open(profile_path, "r") as f:
+            with open(profile_path, "r", encoding="utf-8") as f:
                 profile_data = json.load(f)
+
+            if not profile_matches_camera(profile_data, self.camera_info.get("Model")):
+                print(
+                    f"Profile model mismatch ({profile_data.get('model')} != "
+                    f"{self.camera_info.get('Model')}); refusing to load {profile_filename}"
+                )
+                return False
+
             # ✅ Load the profile before applying any settings
             self.camera_profile = profile_data
             # ✅ Apply settings after loading the profile
@@ -383,53 +546,44 @@ class CameraObject:
             self.update_settings('saveRAW', self.camera_profile['saveRAW'])
             self.apply_profile_controls()
             self.sync_live_controls()  # Ensure UI updates with the latest settings
-            # ✅ Update camera-last-config.json
-            try:
-                if os.path.exists(last_config_file_path):
-                    with open(last_config_file_path, "r") as f:
-                        last_config = json.load(f)
-                else:
-                    last_config = {"cameras": []}
-                # Find the matching camera entry
-                camera_num = self.camera_info['Num']
-                updated = False
-                for camera in last_config["cameras"]:
-                    if camera["Num"] == camera_num:
-                        camera["Has_Config"] = True
-                        camera["Config_Location"] = profile_filename
-                        updated = True
-                        break
-                if not updated:
-                    print(f"\nCamera {camera_num} not found in camera-last-config.json.")
-                with open(last_config_file_path, "w") as f:
-                    json.dump(last_config, f, indent=4)
-                print(f"\nLoaded profile '{profile_filename}' and updated camera-last-config.json.")
-            except Exception as e:
-                print(f"\nError updating camera-last-config.json: {e}")
+            self.camera_info["Has_Config"] = True
+            self.camera_info["Config_Location"] = profile_filename
+            update_camera_entry_in_last_config(self.camera_info)
+            print(f"\nLoaded profile '{profile_filename}' and updated camera-last-config.json.")
             return True
         except Exception as e:
             print(f"\nError loading camera profile '{profile_filename}': {e}")
             return False
 
+    def _default_camera_profile_dict(self):
+        return {
+            "hflip": 0,
+            "vflip": 0,
+            "rotation": 0,
+            "sensor_mode": 0,
+            "live_preview": True,
+            "model": self.camera_info.get("Model", "Unknown"),
+            "resolutions": {"StillCaptureResolution": 0, "LiveFeedResolution": 0},
+            "saveRAW": False,
+            "controls": {},
+        }
+
     def generate_camera_profile(self):
-        file_name = os.path.join(camera_profile_folder, 'camera-module-info.json')
-        # If there is no existing config, or the file doesn't exist, create a default profile
-        if not self.camera_info.get("Has_Config", False) or not os.path.exists(file_name):
-            self.camera_profile = {
-                "hflip": 0,
-                "vflip": 0,
-                "rotation": 0,
-                "sensor_mode": 0,
-                "live_preview": True,
-                "model": self.camera_info.get("Model", "Unknown"),
-                "resolutions": {"StillCaptureResolution": 0, "LiveFeedResolution": 0},
-                "saveRAW": False,
-                "controls": {}
-            }
-        else:
-            # Load existing profile from file
-            with open(file_name, 'r') as file:
-                self.camera_profile = json.load(file)
+        self.camera_profile = self._default_camera_profile_dict()
+
+        optional_default = os.path.join(
+            camera_profile_folder,
+            f"default_{self.camera_info.get('Model', 'Unknown')}.json",
+        )
+        if os.path.exists(optional_default):
+            try:
+                with open(optional_default, 'r', encoding='utf-8') as file:
+                    profile_data = json.load(file)
+                if profile_matches_camera(profile_data, self.camera_info.get("Model")):
+                    self.camera_profile = profile_data
+            except (json.JSONDecodeError, OSError) as e:
+                print(f"Error loading default profile {optional_default}: {e}")
+
         return self.camera_profile
     
     def initialize_controls_template(self, picamera2_controls):
@@ -879,33 +1033,14 @@ class CameraObject:
             if filename.lower().endswith(".json"):
                 filename = filename[:-5]
             profile_path = os.path.join(camera_profile_folder, f"{filename}.json")
+            self.camera_profile["model"] = self.camera_info.get("Model", "Unknown")
             # Save the profile
             with open(profile_path, "w") as f:
                 json.dump(self.camera_profile, f, indent=4)
-            # ✅ Update camera-last-config.json
-            try:
-                if os.path.exists(last_config_file_path):
-                    with open(last_config_file_path, "r") as f:
-                        last_config = json.load(f)
-                else:
-                    last_config = {"cameras": []}  # Create an empty structure if missing
-                # Find the camera entry matching the current camera number
-                camera_num = self.camera_info["Num"]
-                updated = False
-                for camera in last_config["cameras"]:
-                    if camera["Num"] == camera_num:
-                        camera["Has_Config"] = True
-                        camera["Config_Location"] = f"{filename}.json"  # Set the new config file
-                        updated = True
-                        break
-                if not updated:
-                    print(f"Warning: Camera {camera_num} not found in camera-last-config.json.")
-                # Save the updated configuration back
-                with open(last_config_file_path, "w") as f:
-                    json.dump(last_config, f, indent=4)
-                print(f"Updated camera-last-config.json for camera {camera_num} after saving profile.")
-            except Exception as e:
-                print(f"Error updating camera-last-config.json: {e}")
+            self.camera_info["Has_Config"] = True
+            self.camera_info["Config_Location"] = f"{filename}.json"
+            update_camera_entry_in_last_config(self.camera_info)
+            print(f"Updated camera-last-config.json for camera {self.camera_info['Num']} after saving profile.")
             return True
         except Exception as e:
             print(f"Error saving profile: {e}")
@@ -1615,51 +1750,17 @@ class ImageGallery:
 ####################
 
 # Template for a new config which will be the new camera-last-config
-currently_connected_cameras = {'cameras': []}
-# Iterate over each camera in the global_cameras list building a config model
-for connected_camera in global_cameras:   
-    # Check if the connected camera is a Raspberry Pi Camera Module
-    matching_module = next(
-        (module for module in camera_module_info["camera_modules"] 
-         if module["sensor_model"] == connected_camera["Model"]), 
-        None
-    )
-    if matching_module and matching_module.get("is_pi_cam", False) is True:
-        print(f"Connected camera model '{connected_camera['Model']}' is found in the camera-module-info.json and is a Pi Camera.\n")
-        is_pi_cam = True
-    else:
-        print(f"Connected camera model '{connected_camera['Model']}' is either NOT in the camera-module-info.json or is NOT a Pi Camera.\n")
-        is_pi_cam = False
-    # Build usable Connected Camera Information variable
-    camera_info = {'Num':connected_camera['Num'], 'Model':connected_camera['Model'], 'Is_Pi_Cam': is_pi_cam, 'Has_Config': False, 'Config_Location': f"default_{connected_camera['Model']}.json"}
-    currently_connected_cameras['cameras'].append(camera_info)
-
-# Create a lookup for existing cameras by "Num"
-existing_cameras_lookup = {cam["Num"]: cam for cam in camera_last_config["cameras"]}
-# Prepare the updated list of cameras
-updated_cameras = []
-
-# Compare config generated from global_cameras with what was last connected and update the camera-last-config
-for new_cam in currently_connected_cameras["cameras"]:
-    cam_num = new_cam["Num"]
-    if cam_num in existing_cameras_lookup:
-        old_cam = existing_cameras_lookup[cam_num]  
-        # If the camera model has changed, update it
-        if old_cam["Model"] != new_cam["Model"]:
-            print(f"Updating camera {new_cam['Model']}: Model or Pi Cam status changed.")
-            updated_cameras.append(new_cam)
-        else:
-            # Keep existing config if nothing changed
-            updated_cameras.append(old_cam)
-    else:
-        # If it's a new camera, add it to the list
-        print(f"New camera added to config: {new_cam}")
-        updated_cameras.append(new_cam)
+detected_cameras = [build_camera_info_from_detection(connected_camera) for connected_camera in global_cameras]
+module_info_changed = camera_module_info_changed_since_last_run()
+updated_cameras = merge_detected_cameras_with_cache(
+    detected_cameras,
+    camera_last_config,
+    invalidate_saved_profiles=module_info_changed,
+)
 
 # Save the updated configuration
 new_config = {"cameras": updated_cameras}
-with open(os.path.join(current_dir, 'camera-last-config.json'), "w") as file:
-    json.dump(new_config, file, indent=4)
+save_camera_last_config(new_config)
 
 # Make sure currently_connected_cameras is the definitively list of connected cameras
 currently_connected_cameras = updated_cameras
@@ -1830,6 +1931,36 @@ def update_system_setting():
         return jsonify({"success": True, "software_rotation_enabled": enabled})
     except (TypeError, ValueError) as e:
         return jsonify({"success": False, "error": str(e)}), 400
+
+@app.route('/clear_camera_cache', methods=['POST'])
+def clear_camera_cache():
+    global camera_last_config
+
+    try:
+        load_camera_module_info()
+        app_settings["camera_module_info_mtime"] = get_camera_module_info_mtime()
+        save_app_settings()
+
+        detected_cameras = [build_camera_info_from_detection(connected_camera) for connected_camera in global_cameras]
+        camera_last_config = {"cameras": detected_cameras}
+        save_camera_last_config(camera_last_config)
+
+        for camera_info in detected_cameras:
+            camera = cameras.get(camera_info["Num"])
+            if not camera:
+                continue
+            camera.camera_info = camera_info
+            camera.reload_after_cache_clear()
+
+        return jsonify({
+            "success": True,
+            "message": "Camera cache cleared. Saved profile links were reset for all connected cameras.",
+            "cameras": detected_cameras,
+        })
+    except Exception as e:
+        print(f"Error clearing camera cache: {e}")
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/set_camera_config', methods=['POST'])
 def set_camera_config():

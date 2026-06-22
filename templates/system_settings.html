@@ -42,6 +42,26 @@
     </div>
   </div>
 
+  <!-- Camera cache -->
+  <div class="mb-5">
+    <h2 class="pb-2 mb-4 border-bottom">Camera Cache</h2>
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <p class="text-muted mb-3">
+          CamUI remembers saved profile links in <code>camera-last-config.json</code>.
+          Clear this if you changed camera modules, edited <code>camera-module-info.json</code>,
+          or the UI seems to be using stale resolution or profile data.
+        </p>
+        <button type="button" class="btn btn-warning"
+          data-bs-toggle="modal"
+          data-bs-target="#clearCacheModal">
+          Clear camera cache
+        </button>
+        <div id="clearCacheAlert" class="alert mt-3 mb-0 d-none" role="alert"></div>
+      </div>
+    </div>
+  </div>
+
   {% if firmware_control %}
   <!-- 2. Camera Modules Section -->
   <div>
@@ -76,7 +96,24 @@
 
 </div>
 
-
+<div class="modal fade" id="clearCacheModal" tabindex="-1" aria-labelledby="clearCacheModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content shadow">
+      <div class="modal-header">
+        <h5 class="modal-title" id="clearCacheModalLabel">Clear Camera Cache</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        Reset saved profile links for all connected cameras and reload defaults from the currently detected hardware?
+        This does not delete images in the gallery.
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-warning" id="confirmClearCacheButton">Clear cache</button>
+      </div>
+    </div>
+  </div>
+</div>
 
 <div class="modal fade" id="cameraModal" tabindex="-1" aria-labelledby="cameraModalLabel" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered">
@@ -132,6 +169,34 @@
       showSoftwareRotationAlert('danger', 'Request failed: ' + error);
     });
   }
+
+  function showClearCacheAlert(type, message) {
+    const alert = document.getElementById("clearCacheAlert");
+    alert.className = `alert alert-${type} mt-3 mb-0`;
+    alert.textContent = message;
+    alert.classList.remove("d-none");
+  }
+
+  document.getElementById("confirmClearCacheButton").addEventListener("click", function () {
+    const confirmButton = this;
+    confirmButton.disabled = true;
+
+    fetch('/clear_camera_cache', { method: 'POST' })
+      .then(response => response.json())
+      .then(data => {
+        if (!data.success) {
+          throw new Error(data.error || 'Failed to clear camera cache');
+        }
+        bootstrap.Modal.getInstance(document.getElementById('clearCacheModal'))?.hide();
+        showClearCacheAlert('success', data.message);
+      })
+      .catch(error => {
+        showClearCacheAlert('danger', error.message || 'Request failed');
+      })
+      .finally(() => {
+        confirmButton.disabled = false;
+      });
+  });
 
   let currentAction = null;
 
