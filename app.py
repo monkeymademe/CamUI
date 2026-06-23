@@ -799,6 +799,26 @@ class CameraObject:
         if not self.camera_init:
             self.picam2.start()
 
+    def _flip_bool(self, value):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in ("1", "true", "yes", "on")
+        try:
+            return bool(int(value))
+        except (TypeError, ValueError):
+            return bool(value)
+
+    def _restart_video_pipeline(self):
+        if self.camera_init:
+            return
+        self.picam2.start(self.video_config, show_preview=False)
+        time.sleep(0.1)
+        self.start_streaming()
+        self.flush_frames()
+        self._did_runtime_ae_enable_sync = False
+        self.use_placeholder = False
+
     # Update camera settings flip and resolution settings
     def update_camera_config(self, update=None):
         # Update the camera configuration.
@@ -827,11 +847,7 @@ class CameraObject:
 
             if not self.camera_init:
                 print("Starting camera")
-                time.sleep(0.1)
-                self.picam2.start()
-                time.sleep(0.1)
-                self.start_streaming()
-                self.use_placeholder = False
+                self._restart_video_pipeline()
 
             print_section("Camera reconfiguration complete")
 
@@ -850,11 +866,8 @@ class CameraObject:
             time.sleep(0.1)
         self.set_orientation()
         self.picam2.configure(self.video_config)
-        if not self.camera_init:    
-            time.sleep(0.1)
-            self.picam2.start()
-            self.start_streaming()
-            self.use_placeholder = False
+        if not self.camera_init:
+            self._restart_video_pipeline()
 
     def load_saved_camera_profile(self):
         if not (self.camera_info.get("Has_Config") and self.camera_info.get("Config_Location")):
@@ -1220,9 +1233,9 @@ class CameraObject:
         # Handle hflip and vflip separately
         elif setting_id in ["hflip", "vflip"]:
             try:
-                self.camera_profile[setting_id] = bool(int(setting_value))
-                self.update_camera_config()
-                print(f"Applied transform: {setting_id} -> {setting_value} (Camera restarted)")
+                self.camera_profile[setting_id] = self._flip_bool(setting_value)
+                self.update_camera_config(update="video")
+                print(f"Applied transform: {setting_id} -> {self.camera_profile[setting_id]} (stream restarted)")
             except ValueError as e:
                 print(f"⚠️ Error: {e}")
         elif setting_id == "rotation":
@@ -1295,7 +1308,10 @@ class CameraObject:
             for setting in section.get("settings", []):
                 setting_id = setting["id"]
                 if setting_id in top_level_keys and setting_id in self.camera_profile:
-                    setting["value"] = self.camera_profile[setting_id]
+                    if setting_id in ("hflip", "vflip"):
+                        setting["value"] = self._flip_bool(self.camera_profile[setting_id])
+                    else:
+                        setting["value"] = self.camera_profile[setting_id]
                 elif setting_id in self.camera_profile["controls"]:
                     setting["value"] = self.camera_profile["controls"][setting_id]
                 # Sync child settings
@@ -1346,14 +1362,11 @@ class CameraObject:
                 self.picam2.set_controls({key: controls_map[key]})
     
     def set_orientation(self):
-        # Get current transform settings
         transform = Transform()
-        # Apply hflip and vflip from camera_profile
-        transform.hflip = self.camera_profile.get("hflip", False)
-        transform.vflip = self.camera_profile.get("vflip", False)
-        # Update both video and still configs
-        self.still_config['transform'] = transform
-        self.video_config['transform'] = transform
+        transform.hflip = self._flip_bool(self.camera_profile.get("hflip", False))
+        transform.vflip = self._flip_bool(self.camera_profile.get("vflip", False))
+        self.still_config["transform"] = transform
+        self.video_config["transform"] = transform
         print("Applied Orientation - hflip:", transform.hflip, "vflip:", transform.vflip)
 
     def get_rotation(self):
@@ -1435,6 +1448,7 @@ class CameraObject:
                 main={"size": self.camera_resolutions[int(self.camera_profile['resolutions']['LiveFeedResolution'])]}, 
                 sensor={'output_size': mode['size'], 'bit_depth': mode['bit_depth']},
             )
+            self.set_orientation()
             
             # Configure the camera
             try:
@@ -1451,10 +1465,7 @@ class CameraObject:
             # Restart the camera if it was running
             if not self.camera_init:
                 try:
-                    self.picam2.start()
-                    self.start_streaming()
-                    time.sleep(0.2)  # Increased delay for high-res modes
-                    self.use_placeholder = False
+                    self._restart_video_pipeline()
                 except Exception as e:
                     print(f"⚠️ Error restarting camera: {e}")
                     self.use_placeholder = True
@@ -1490,22 +1501,13 @@ class CameraObject:
         resolution = self.camera_resolutions[resolution_index]
         print(f"Setting live feed resolution to: {resolution}")
 
-        # Update video config
-        self.video_config = self.picam2.create_video_configuration(main={"size": resolution})
-        # Apply new configuration
+        mode_index = int(self.camera_profile.get("sensor_mode", 0))
+        mode = self.sensor_modes[mode_index]
+        self.video_config = self.picam2.create_video_configuration(
+            main={"size": resolution},
+            sensor={"output_size": mode["size"], "bit_depth": mode["bit_depth"]},
+        )
         self.configure_video_config()
-
-        # Restart the camera if it was running
-        if not self.camera_init:
-            try:
-                self.picam2.start()
-                self.start_streaming()
-                time.sleep(0.2)  # Increased delay for high-res modes
-                self.use_placeholder = False
-            except Exception as e:
-                print(f"⚠️ Error restarting camera: {e}")
-                self.use_placeholder = True
-                raise
 
     def update_camera_from_metadata(self):
         metadata = self.capture_metadata()
@@ -1890,6 +1892,7 @@ class CameraObject:
             self.stop_streaming()
             self.picam2.stop()
             time.sleep(0.2)
+            self.set_orientation()
             self.picam2.start(self.video_config, show_preview=False)
             self.start_streaming()
             self.flush_frames()
