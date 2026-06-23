@@ -2676,7 +2676,7 @@ def timelapse(camera_num):
     camera = cameras.get(camera_num)
     if not camera:
         return render_template("camera_not_found.html", camera_num=camera_num), 404
-        return render_template(
+    return render_template(
         "timelapse.html",
         camera=camera.camera_info,
         camera_module=camera.camera_module_spec,
