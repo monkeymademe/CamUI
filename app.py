@@ -7,7 +7,7 @@ import argparse
 import importlib.util
 
 # Flask imports
-from flask import Flask, render_template, request, jsonify, Response, send_file, abort, session, redirect, url_for, after_this_request
+from flask import Flask, render_template, request, jsonify, Response, send_file, abort, session, redirect, url_for, after_this_request, make_response
 import secrets
 
 # picamera2 imports
@@ -27,6 +27,12 @@ from werkzeug.utils import secure_filename
 
 from timelapse import TimelapseManager
 from timelapse_export import create_timelapse_zip, create_timelapse_video, ffmpeg_available
+from thermal_print import (
+    DEFAULT_FUN_LINES,
+    normalize_print_settings,
+    is_printer_available,
+    queue_photobooth_print,
+)
 
 # Plugin hooks registry
 global plugin_hooks
@@ -155,6 +161,8 @@ upload_folder = ensure_directory(os.path.join(current_dir, 'static/gallery'))
 app.config['upload_folder'] = upload_folder
 timelapse_root = ensure_directory(os.path.join(upload_folder, 'timelapses'))
 timelapse_manager = TimelapseManager()
+photobooth_asset_folder = ensure_directory(os.path.join(current_dir, 'static/photobooth'))
+PHOTOBOOTH_LOGO_FILENAME = "logo.png"
 
 # For the image gallery set items per page
 items_per_page = 12
@@ -180,6 +188,25 @@ DEFAULT_APP_SETTINGS = {
     "software_rotation_enabled": False,
     "camera_module_info_mtime": None,
     "annotations": DEFAULT_ANNOTATION_SETTINGS,
+    "photobooth_print": {
+        "enabled": True,
+        "title": "CamUI Photobooth",
+        "show_date": True,
+        "paper_width_mm": 80,
+        "paper_width_px": 576,
+        "density": 4,
+        "cut_mode": "PART",
+        "cut_feed_lines": 6,
+        "logo_enabled": False,
+        "logo_position": "before_title",
+        "logo_scale_percent": 100,
+        "logo_max_height": 120,
+        "fun_lines": list(DEFAULT_FUN_LINES),
+        "fun_line_print": True,
+        "fun_line_position": "after_photo",
+        "usb_vendor_id": "04b8",
+        "usb_product_id": "0e15",
+    },
 }
 
 app_settings_path = os.path.join(current_dir, 'camui_settings.json')
@@ -270,6 +297,21 @@ def normalize_annotation_settings(raw=None):
 
 def get_annotation_settings():
     return normalize_annotation_settings(app_settings.get("annotations"))
+
+def get_photobooth_print_settings():
+    settings = normalize_print_settings(app_settings.get("photobooth_print"))
+    logo_path = os.path.join(photobooth_asset_folder, PHOTOBOOTH_LOGO_FILENAME)
+    if settings.get("logo_enabled") and os.path.isfile(logo_path):
+        settings["logo_path"] = logo_path
+        settings["logo_url"] = (
+            f"/static/photobooth/{PHOTOBOOTH_LOGO_FILENAME}?t={int(os.path.getmtime(logo_path))}"
+        )
+    else:
+        settings["logo_path"] = None
+        settings["logo_url"] = None
+        if settings.get("logo_enabled") and not os.path.isfile(logo_path):
+            settings["logo_enabled"] = False
+    return settings
 
 def build_annotation_lines(camera, metadata=None, captured_at=None):
     settings = get_annotation_settings()
@@ -467,6 +509,7 @@ def apply_annotations_to_file(image_path, lines):
 camera_last_config = load_or_initialize_config(last_config_file_path, minimum_last_config)
 app_settings = load_or_initialize_config(app_settings_path, DEFAULT_APP_SETTINGS.copy())
 app_settings["annotations"] = normalize_annotation_settings(app_settings.get("annotations"))
+app_settings["photobooth_print"] = normalize_print_settings(app_settings.get("photobooth_print"))
 
 def save_camera_last_config(config):
     with open(last_config_file_path, 'w') as file:
@@ -2770,6 +2813,8 @@ def system_settings():
         camera_modules=camera_module_info.get("camera_modules", []),
         software_rotation_enabled=is_software_rotation_enabled(),
         annotation_settings=get_annotation_settings(),
+        photobooth_print_settings=get_photobooth_print_settings(),
+        photobooth_printer_available=is_printer_available(get_photobooth_print_settings()),
     )
 
 @app.route('/update_annotation_settings', methods=['POST'])
@@ -2782,6 +2827,76 @@ def update_annotation_settings():
         return jsonify({"success": True, "annotations": normalized})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 400
+
+@app.route('/update_photobooth_print_settings', methods=['POST'])
+def update_photobooth_print_settings():
+    data = request.get_json(silent=True) or {}
+    try:
+        # Merge with existing settings so partial updates (e.g. toggle only) keep title/USB ids.
+        merged = dict(app_settings.get("photobooth_print") or {})
+        # Never accept client-supplied filesystem paths.
+        data.pop("logo_path", None)
+        data.pop("logo_url", None)
+        merged.update(data)
+        normalized = normalize_print_settings(merged)
+        app_settings["photobooth_print"] = normalized
+        save_app_settings()
+        return jsonify({
+            "success": True,
+            "photobooth_print": get_photobooth_print_settings(),
+            "printer_available": is_printer_available(normalized),
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+
+
+@app.route('/upload_photobooth_logo', methods=['POST'])
+def upload_photobooth_logo():
+    if "logo" not in request.files:
+        return jsonify({"success": False, "error": "No logo file provided"}), 400
+    file = request.files["logo"]
+    if not file or not file.filename:
+        return jsonify({"success": False, "error": "Empty logo upload"}), 400
+
+    try:
+        from PIL import Image, ImageOps
+
+        image = Image.open(file.stream)
+        image = ImageOps.exif_transpose(image)
+        # Preserve transparency in stored PNG; print path flattens onto white.
+        if image.mode not in ("RGB", "RGBA"):
+            image = image.convert("RGBA" if "A" in image.getbands() else "RGB")
+
+        ensure_directory(photobooth_asset_folder)
+        dest = os.path.join(photobooth_asset_folder, PHOTOBOOTH_LOGO_FILENAME)
+        if not is_safe_path(photobooth_asset_folder, dest):
+            return jsonify({"success": False, "error": "Invalid logo path"}), 400
+        image.save(dest, format="PNG", optimize=True)
+
+        merged = dict(app_settings.get("photobooth_print") or {})
+        merged["logo_enabled"] = True
+        app_settings["photobooth_print"] = normalize_print_settings(merged)
+        save_app_settings()
+        settings = get_photobooth_print_settings()
+        return jsonify({"success": True, "photobooth_print": settings})
+    except Exception as e:
+        return jsonify({"success": False, "error": f"Logo upload failed: {e}"}), 400
+
+
+@app.route('/delete_photobooth_logo', methods=['POST'])
+def delete_photobooth_logo():
+    try:
+        dest = os.path.join(photobooth_asset_folder, PHOTOBOOTH_LOGO_FILENAME)
+        if os.path.isfile(dest) and is_safe_path(photobooth_asset_folder, dest):
+            os.remove(dest)
+        merged = dict(app_settings.get("photobooth_print") or {})
+        merged["logo_enabled"] = False
+        app_settings["photobooth_print"] = normalize_print_settings(merged)
+        save_app_settings()
+        return jsonify({"success": True, "photobooth_print": get_photobooth_print_settings()})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 400
+
 
 @app.route('/update_system_setting', methods=['POST'])
 def update_system_setting():
@@ -2979,6 +3094,42 @@ def camera_mobile(camera_num):
         print(f"Error loading camera view: {e}")
         return render_template('error.html', error=str(e))
 
+@app.route("/photobooth_<int:camera_num>")
+def photobooth(camera_num):
+    try:
+        camera = cameras.get(camera_num)
+        if not camera:
+            return render_template('camera_not_found.html', camera_num=camera_num)
+        live_controls = camera.live_controls
+        sensor_modes = camera.sensor_modes
+        active_mode_index = camera.get_sensor_mode()
+        last_image = image_gallery_manager.find_last_image_taken()
+        response = make_response(render_template(
+            'photobooth.html',
+            camera=camera.camera_info,
+            settings=live_controls,
+            sensor_modes=sensor_modes,
+            active_mode_index=active_mode_index,
+            last_image=last_image,
+            profiles=list_profiles(),
+            photobooth_print_settings=get_photobooth_print_settings(),
+            navbar=False,
+            theme='dark',
+            mode="photobooth",
+            tuning=get_tuning_ui_context(camera),
+        ))
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        return response
+    except Exception as e:
+        print(f"Error loading photobooth view: {e}")
+        return render_template('error.html', error=str(e))
+
+@app.route("/photobooth_capture_<int:camera_num>", methods=["POST"])
+def photobooth_capture(camera_num):
+    """Photobooth-only capture that always attempts a thermal print."""
+    return _do_capture_still(camera_num, photobooth_capture=True)
+
 @app.route("/camera_<int:camera_num>")
 def camera(camera_num):
     try:
@@ -3000,52 +3151,84 @@ def camera(camera_num):
 # Dictionary to track the last capture time per camera
 last_capture_time = {}
 
-@app.route("/capture_still_<int:camera_num>", methods=["POST"])
-def capture_still(camera_num):
+def _do_capture_still(camera_num, photobooth_capture=False):
     global last_capture_time
 
     try:
-        print(f"📸 Received capture request for camera {camera_num}")
+        data = request.get_json(silent=True) or {}
+        fun_line = str(data.get("fun_line") or "").strip()[:80]
+        print(f"Received capture request for camera {camera_num} (photobooth={photobooth_capture})", flush=True)
 
         camera = cameras.get(camera_num)
         if not camera:
-            print(f"❌ Camera {camera_num} not found.")
+            print(f"Camera {camera_num} not found.", flush=True)
             return jsonify(success=False, message="Camera not found"), 404
 
         if timelapse_manager.is_running(camera_num):
             return jsonify(success=False, message="Timelapse is running — stop it before capturing manually"), 409
 
-        # Rate limit: Prevent captures happening too quickly (2 seconds per camera)
-        current_time = time.time()
-        #if camera_num in last_capture_time and (current_time - last_capture_time[camera_num]) < 2:
-        #   print(f"⚠️ Capture request too fast for camera {camera_num}. Ignoring request.")
-        #   return jsonify(success=False, message="Capture request too fast"), 429  # Too Many Requests
+        last_capture_time[camera_num] = time.time()
 
-        # Update the last capture time for this camera
-        last_capture_time[camera_num] = current_time
-
-        # Generate the new filename
-        timestamp = int(time.time())  # Current Unix timestamp
+        timestamp = int(time.time())
         image_filename = f"pimage_camera_{camera_num}_{timestamp}"
-        print(f"📁 New image filename: {image_filename}")
+        print(f"New image filename: {image_filename}", flush=True)
 
-        # Capture and save the new image
         image_path = camera.take_still(camera_num, image_filename)
-
-        # Add a slight delay to prevent overlapping captures
         time.sleep(0.5)
 
-        if image_path:
-            print(f"✅ Image captured successfully: {image_filename}")
-            return jsonify(success=True, message="Image captured successfully", image=image_filename)
-        else:
-            print(f"❌ Failed to capture image for camera {camera_num}")
+        if not image_path:
+            print(f"Failed to capture image for camera {camera_num}", flush=True)
             return jsonify(success=False, message="Failed to capture image")
 
+        print(f"Image captured successfully: {image_filename}", flush=True)
+        response = {
+            "success": True,
+            "message": "Image captured successfully",
+            "image": image_filename,
+        }
+        if photobooth_capture:
+            print_settings = get_photobooth_print_settings()
+            print(f"Photobooth capture: print enabled={print_settings.get('enabled')}", flush=True)
+            if print_settings.get("enabled"):
+                full_path = image_path if str(image_path).endswith(".jpg") else f"{image_path}.jpg"
+                result = queue_photobooth_print(
+                    full_path, print_settings, wait=True, fun_line=fun_line or None
+                )
+                response["print_queued"] = bool(result.get("queued") or result.get("printed"))
+                response["print_printed"] = bool(result.get("printed"))
+                if result.get("error"):
+                    response["print_error"] = result["error"]
+                    print(f"Photobooth print error: {result['error']}", flush=True)
+                else:
+                    print(f"Photobooth print OK for {full_path}", flush=True)
+            else:
+                response["print_queued"] = False
+                response["print_printed"] = False
+            if fun_line:
+                response["fun_line"] = fun_line
+        return jsonify(response)
+
     except Exception as e:
-        print(f"🔥 Error capturing still image: {e}")
+        print(f"Error capturing still image: {e}", flush=True)
         return jsonify(success=False, message=str(e)), 500
-    
+
+@app.route("/capture_still_<int:camera_num>", methods=["POST"])
+def capture_still(camera_num):
+    data = request.get_json(silent=True) or {}
+    referer = request.headers.get("Referer") or ""
+    photobooth_capture = bool(
+        data.get("photobooth")
+        or request.args.get("photobooth") in ("1", "true", "True", "yes")
+        or "/photobooth_" in referer
+    )
+    print(
+        f"Capture request camera={camera_num} photobooth={photobooth_capture} "
+        f"json={bool(data.get('photobooth'))} "
+        f"query={request.args.get('photobooth')} referer_booth={'/photobooth_' in referer}",
+        flush=True,
+    )
+    return _do_capture_still(camera_num, photobooth_capture=photobooth_capture)
+
 @app.route('/snapshot_<int:camera_num>')
 def snapshot(camera_num):
     camera = cameras.get(camera_num)
@@ -3661,7 +3844,7 @@ if __name__ == "__main__":
     # If there are no arguments the port will be 8080 and ip 0.0.0.0
     context = {'cameras': cameras, 'plugin_hooks': plugin_hooks}
     load_plugins(app, context)
-    app.run(host=args.ip, port=args.port)
+    app.run(host=args.ip, port=args.port, threaded=True)
 
 @app.errorhandler(404)
 def not_found_error(error):

@@ -6,7 +6,7 @@
             "Is_Pi_Cam": true,
             "Has_Config": false,
             "Config_Location": "default_imx477.json",
-            "Tuning_File": "imx477.json",
+            "Tuning_File": null,
             "NoIR_Mode": false
         }
     ]

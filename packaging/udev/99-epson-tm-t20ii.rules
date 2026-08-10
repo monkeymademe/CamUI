@@ -1,0 +1,3 @@
+# Epson TM-T20II — allow non-root access for CamUI photobooth printing
+# Vendor 04b8 / Product 0e15
+SUBSYSTEM=="usb", ATTR{idVendor}=="04b8", ATTR{idProduct}=="0e15", MODE="0664", GROUP="plugdev", TAG+="uaccess"

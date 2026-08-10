@@ -1,3 +1,5 @@
 flask
 picamera2
 Pillow
+python-escpos
+pyusb

@@ -31,7 +31,9 @@ document.addEventListener("DOMContentLoaded", function () {
 
     function updateTheme(theme) {
         document.documentElement.setAttribute("data-bs-theme", theme);
-        themeIcon.className = theme === "light" ? "bi bi-brightness-high-fill" : "bi bi-moon-stars-fill";
+        if (themeIcon) {
+            themeIcon.className = theme === "light" ? "bi bi-brightness-high-fill" : "bi bi-moon-stars-fill";
+        }
     }
 
     updateTheme(theme);  // Apply the correct theme and icon on page load

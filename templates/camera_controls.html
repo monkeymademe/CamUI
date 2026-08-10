@@ -3,22 +3,31 @@
 <h2 class="pb-2 mb-4 border-bottom">Camera Settings</h2>
 
 <div class="container text-center mt-4">
-    <div class="row justify-content-center">
+    <div class="row justify-content-center g-2">
         <!-- Desktop Mode Button -->
-        <div class="col-6">
-            <a href="/camera_{{ camera.Num }}" class="btn btn-lg w-100 d-flex flex-column align-items-center px-4 
+        <div class="col-4">
+            <a href="/camera_{{ camera.Num }}" class="btn btn-lg w-100 d-flex flex-column align-items-center px-2 
                 {% if mode == 'desktop' %} btn-primary {% else %} btn-secondary {% endif %}">
-                <i class="bi bi-webcam fs-2"></i> <!-- Bootstrap Camera Icon -->
+                <i class="bi bi-webcam fs-2"></i>
                 <span class="fw-bold mt-1">Desktop</span>
             </a>
         </div>
 
         <!-- Mobile Mode Button -->
-        <div class="col-6">
-            <a href="/camera_mobile_{{ camera.Num }}" class="btn btn-lg w-100 d-flex flex-column align-items-center px-4 
+        <div class="col-4">
+            <a href="/camera_mobile_{{ camera.Num }}" class="btn btn-lg w-100 d-flex flex-column align-items-center px-2 
                 {% if mode == 'mobile' %} btn-primary {% else %} btn-secondary {% endif %}">
-                <i class="bi bi-person-badge fs-2"></i> <!-- Bootstrap Camera Icon -->
+                <i class="bi bi-person-badge fs-2"></i>
                 <span class="fw-bold mt-1">Mobile</span>
+            </a>
+        </div>
+
+        <!-- Photobooth Mode Button -->
+        <div class="col-4">
+            <a href="/photobooth_{{ camera.Num }}" class="btn btn-lg w-100 d-flex flex-column align-items-center px-2 
+                {% if mode == 'photobooth' %} btn-primary {% else %} btn-secondary {% endif %}">
+                <i class="bi bi-camera-reels fs-2"></i>
+                <span class="fw-bold mt-1">Booth</span>
             </a>
         </div>
     </div>

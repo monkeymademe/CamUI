@@ -109,6 +109,164 @@
     </div>
   </div>
 
+  <!-- Photobooth thermal print -->
+  <div class="mb-5">
+    <h2 class="pb-2 mb-4 border-bottom">Photobooth Print</h2>
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <p class="text-muted">
+          Automatically print each photobooth capture on the USB Epson TM-T20II
+          (brand title + photo + date). Regular camera captures are not printed.
+        </p>
+        {% if photobooth_printer_available %}
+        <div class="alert alert-success py-2">Printer detected on USB.</div>
+        {% else %}
+        <div class="alert alert-warning py-2">
+          Printer not detected. Check the USB cable and that the udev rule is installed
+          (see <code>packaging/udev/README.md</code>).
+        </div>
+        {% endif %}
+        <div class="form-check form-switch mb-3">
+          <input class="form-check-input" type="checkbox" role="switch" id="photoboothPrintEnabledToggle"
+            {% if photobooth_print_settings.enabled %}checked{% endif %}
+            onchange="togglePhotoboothPrint(this.checked)">
+          <label class="form-check-label" for="photoboothPrintEnabledToggle">
+            Enable photobooth auto-print
+          </label>
+        </div>
+        <div class="mb-3">
+          <label for="photoboothPrintTitle" class="form-label">Brand / title line</label>
+          <input type="text" class="form-control" id="photoboothPrintTitle"
+            maxlength="160"
+            value="{{ photobooth_print_settings.title }}"
+            placeholder="CamUI Photobooth">
+          <div class="form-text">Long titles wrap across multiple lines on the print.</div>
+        </div>
+        <div class="mb-3">
+          <label class="form-label">Print logo</label>
+          <div class="d-flex flex-wrap align-items-start gap-3 mb-2">
+            <div id="photoboothLogoPreviewWrap" class="{% if not photobooth_print_settings.logo_url %}d-none{% endif %}">
+              <img id="photoboothLogoPreview"
+                src="{{ photobooth_print_settings.logo_url or '' }}"
+                alt="Print logo preview"
+                style="max-height: 80px; max-width: 200px; background: #fff; border: 1px solid #dee2e6; padding: 4px;">
+            </div>
+            <div class="flex-grow-1">
+              <input type="file" class="form-control" id="photoboothLogoFile"
+                accept="image/png,image/jpeg,image/webp,image/gif,.png,.jpg,.jpeg,.webp,.gif">
+              <div class="form-text">PNG or JPEG recommended. Transparent PNGs print on white.</div>
+            </div>
+          </div>
+          <div class="d-flex flex-wrap gap-2 mb-3">
+            <button type="button" class="btn btn-outline-primary btn-sm" id="uploadPhotoboothLogoButton">Upload logo</button>
+            <button type="button" class="btn btn-outline-danger btn-sm" id="deletePhotoboothLogoButton"
+              {% if not photobooth_print_settings.logo_url %}disabled{% endif %}>Remove logo</button>
+          </div>
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label for="photoboothLogoPosition" class="form-label">Logo position</label>
+              <select class="form-select" id="photoboothLogoPosition">
+                <option value="before_title" {% if photobooth_print_settings.logo_position == 'before_title' %}selected{% endif %}>
+                  Before brand line
+                </option>
+                <option value="after_title" {% if photobooth_print_settings.logo_position == 'after_title' %}selected{% endif %}>
+                  After brand line
+                </option>
+              </select>
+            </div>
+            <div class="col-md-6">
+              <label for="photoboothLogoScale" class="form-label">Logo scale (%)</label>
+              <input type="number" class="form-control" id="photoboothLogoScale"
+                min="10" max="100" step="1"
+                value="{{ photobooth_print_settings.logo_scale_percent }}">
+              <div class="form-text">100% = full print width.</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="mb-4">
+          <label class="form-label">Fun lines</label>
+          <p class="text-muted small mb-2">
+            Random phrases shown after each shot. Optionally print the same line on the receipt.
+          </p>
+          <div id="funLinesPills" class="d-flex flex-wrap gap-2 mb-3"></div>
+          <div class="input-group mb-3">
+            <input type="text" class="form-control" id="funLineNewInput" maxlength="80"
+              placeholder="Add a fun line">
+            <button type="button" class="btn btn-outline-primary" id="funLineAddButton">Add</button>
+          </div>
+          <div class="form-check form-switch mb-3">
+            <input class="form-check-input" type="checkbox" role="switch" id="photoboothFunLinePrint"
+              {% if photobooth_print_settings.fun_line_print %}checked{% endif %}>
+            <label class="form-check-label" for="photoboothFunLinePrint">
+              Print fun line on receipt
+            </label>
+          </div>
+          <div class="mb-0">
+            <label for="photoboothFunLinePosition" class="form-label">Fun line print position</label>
+            <select class="form-select" id="photoboothFunLinePosition">
+              <option value="before_photo" {% if photobooth_print_settings.fun_line_position == 'before_photo' %}selected{% endif %}>
+                Before photo
+              </option>
+              <option value="after_photo" {% if photobooth_print_settings.fun_line_position == 'after_photo' %}selected{% endif %}>
+                After photo
+              </option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-check form-switch mb-3">
+          <input class="form-check-input" type="checkbox" role="switch" id="photoboothPrintShowDate"
+            {% if photobooth_print_settings.show_date %}checked{% endif %}>
+          <label class="form-check-label" for="photoboothPrintShowDate">
+            Show date on receipt
+          </label>
+        </div>
+        <div class="row g-3 mb-3">
+          <div class="col-md-6">
+            <label for="photoboothPrintPaperWidth" class="form-label">Paper width</label>
+            <select class="form-select" id="photoboothPrintPaperWidth">
+              <option value="80" {% if photobooth_print_settings.paper_width_mm == 80 %}selected{% endif %}>
+                80 mm (576 px)
+              </option>
+              <option value="58" {% if photobooth_print_settings.paper_width_mm == 58 %}selected{% endif %}>
+                58 mm (420 px — needs paper guide)
+              </option>
+            </select>
+          </div>
+          <div class="col-md-6">
+            <label for="photoboothPrintDensity" class="form-label">Image darkness (0 light – 8 dark)</label>
+            <input type="number" class="form-control" id="photoboothPrintDensity"
+              min="0" max="8" step="1"
+              value="{{ photobooth_print_settings.density }}">
+            <div class="form-text">Applied in software to the photo. No CamUI restart needed — next print uses the new value. Hardware density is a printer memory-switch setting.</div>
+          </div>
+        </div>
+        <div class="row g-3 mb-3">
+          <div class="col-md-6">
+            <label for="photoboothPrintCutMode" class="form-label">Cut mode</label>
+            <select class="form-select" id="photoboothPrintCutMode">
+              <option value="PART" {% if photobooth_print_settings.cut_mode == 'PART' %}selected{% endif %}>
+                Partial cut (recommended)
+              </option>
+              <option value="FULL" {% if photobooth_print_settings.cut_mode == 'FULL' %}selected{% endif %}>
+                Full cut
+              </option>
+            </select>
+          </div>
+          <div class="col-md-6">
+            <label for="photoboothPrintFeedLines" class="form-label">Feed lines before cut</label>
+            <input type="number" class="form-control" id="photoboothPrintFeedLines"
+              min="0" max="20" step="1"
+              value="{{ photobooth_print_settings.cut_feed_lines }}">
+          </div>
+        </div>
+        <button type="button" class="btn btn-primary" id="savePhotoboothPrintButton">Save print settings</button>
+        <div id="photoboothPrintAlert" class="alert mt-3 mb-0 d-none" role="alert"></div>
+      </div>
+    </div>
+  </div>
+
   <!-- Camera cache -->
   <div class="mb-5">
     <h2 class="pb-2 mb-4 border-bottom">Camera Cache</h2>
@@ -275,6 +433,186 @@
       })
       .catch((error) => {
         showAnnotationsAlert("danger", error.message || "Request failed");
+      })
+      .finally(() => {
+        saveButton.disabled = false;
+      });
+  });
+
+  function showPhotoboothPrintAlert(type, message) {
+    const alert = document.getElementById("photoboothPrintAlert");
+    alert.className = `alert alert-${type} mt-3 mb-0`;
+    alert.textContent = message;
+    alert.classList.remove("d-none");
+  }
+
+  function togglePhotoboothPrint(enabled) {
+    fetch("/update_photobooth_print_settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+    })
+      .then((response) => response.json())
+      .then((data) => {
+        if (!data.success) {
+          throw new Error(data.error || "Failed to update print setting");
+        }
+        showPhotoboothPrintAlert(
+          "success",
+          enabled ? "Photobooth printing enabled." : "Photobooth printing disabled."
+        );
+      })
+      .catch((error) => {
+        const toggle = document.getElementById("photoboothPrintEnabledToggle");
+        toggle.checked = !enabled;
+        showPhotoboothPrintAlert("danger", error.message || "Request failed");
+      });
+  }
+
+  function applyPhotoboothLogoPreview(settings) {
+    const wrap = document.getElementById("photoboothLogoPreviewWrap");
+    const img = document.getElementById("photoboothLogoPreview");
+    const removeBtn = document.getElementById("deletePhotoboothLogoButton");
+    if (settings && settings.logo_url) {
+      img.src = settings.logo_url;
+      wrap.classList.remove("d-none");
+      removeBtn.disabled = false;
+    } else {
+      img.removeAttribute("src");
+      wrap.classList.add("d-none");
+      removeBtn.disabled = true;
+    }
+  }
+
+  let funLines = {{ photobooth_print_settings.fun_lines | tojson }};
+
+  function renderFunLinePills() {
+    const wrap = document.getElementById("funLinesPills");
+    wrap.innerHTML = "";
+    funLines.forEach((phrase, index) => {
+      const pill = document.createElement("button");
+      pill.type = "button";
+      pill.className = "btn btn-sm btn-outline-secondary rounded-pill";
+      pill.textContent = phrase + " ×";
+      pill.title = "Remove";
+      pill.addEventListener("click", () => {
+        funLines.splice(index, 1);
+        renderFunLinePills();
+      });
+      wrap.appendChild(pill);
+    });
+    if (!funLines.length) {
+      const empty = document.createElement("span");
+      empty.className = "text-muted small";
+      empty.textContent = "No fun lines yet — add at least one.";
+      wrap.appendChild(empty);
+    }
+  }
+
+  function addFunLine() {
+    const input = document.getElementById("funLineNewInput");
+    const text = (input.value || "").trim();
+    if (!text) return;
+    if (!funLines.includes(text)) {
+      funLines.push(text.slice(0, 80));
+      renderFunLinePills();
+    }
+    input.value = "";
+    input.focus();
+  }
+
+  document.getElementById("funLineAddButton").addEventListener("click", addFunLine);
+  document.getElementById("funLineNewInput").addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      addFunLine();
+    }
+  });
+  renderFunLinePills();
+
+  document.getElementById("uploadPhotoboothLogoButton").addEventListener("click", function () {
+    const fileInput = document.getElementById("photoboothLogoFile");
+    if (!fileInput.files || !fileInput.files[0]) {
+      showPhotoboothPrintAlert("warning", "Choose a logo image first.");
+      return;
+    }
+    const button = this;
+    button.disabled = true;
+    const formData = new FormData();
+    formData.append("logo", fileInput.files[0]);
+    fetch("/upload_photobooth_logo", { method: "POST", body: formData })
+      .then((response) => response.json())
+      .then((data) => {
+        if (!data.success) {
+          throw new Error(data.error || "Logo upload failed");
+        }
+        applyPhotoboothLogoPreview(data.photobooth_print);
+        fileInput.value = "";
+        showPhotoboothPrintAlert("success", "Logo uploaded. It will print on the next photobooth shot.");
+      })
+      .catch((error) => {
+        showPhotoboothPrintAlert("danger", error.message || "Upload failed");
+      })
+      .finally(() => {
+        button.disabled = false;
+      });
+  });
+
+  document.getElementById("deletePhotoboothLogoButton").addEventListener("click", function () {
+    const button = this;
+    button.disabled = true;
+    fetch("/delete_photobooth_logo", { method: "POST" })
+      .then((response) => response.json())
+      .then((data) => {
+        if (!data.success) {
+          throw new Error(data.error || "Failed to remove logo");
+        }
+        applyPhotoboothLogoPreview(data.photobooth_print);
+        showPhotoboothPrintAlert("success", "Logo removed.");
+      })
+      .catch((error) => {
+        showPhotoboothPrintAlert("danger", error.message || "Request failed");
+        button.disabled = false;
+      });
+  });
+
+  document.getElementById("savePhotoboothPrintButton").addEventListener("click", function () {
+    const saveButton = this;
+    saveButton.disabled = true;
+
+    fetch("/update_photobooth_print_settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        enabled: document.getElementById("photoboothPrintEnabledToggle").checked,
+        title: document.getElementById("photoboothPrintTitle").value,
+        show_date: document.getElementById("photoboothPrintShowDate").checked,
+        paper_width_mm: parseInt(document.getElementById("photoboothPrintPaperWidth").value, 10),
+        density: parseInt(document.getElementById("photoboothPrintDensity").value, 10),
+        cut_mode: document.getElementById("photoboothPrintCutMode").value,
+        cut_feed_lines: parseInt(document.getElementById("photoboothPrintFeedLines").value, 10),
+        logo_position: document.getElementById("photoboothLogoPosition").value,
+        logo_scale_percent: parseInt(document.getElementById("photoboothLogoScale").value, 10),
+        fun_lines: funLines,
+        fun_line_print: document.getElementById("photoboothFunLinePrint").checked,
+        fun_line_position: document.getElementById("photoboothFunLinePosition").value,
+      }),
+    })
+      .then((response) => response.json())
+      .then((data) => {
+        if (!data.success) {
+          throw new Error(data.error || "Failed to save print settings");
+        }
+        applyPhotoboothLogoPreview(data.photobooth_print);
+        if (data.photobooth_print && Array.isArray(data.photobooth_print.fun_lines)) {
+          funLines = data.photobooth_print.fun_lines;
+          renderFunLinePills();
+        }
+        const status = data.printer_available ? "Printer detected." : "Printer not detected.";
+        showPhotoboothPrintAlert("success", "Print settings saved. " + status);
+      })
+      .catch((error) => {
+        showPhotoboothPrintAlert("danger", error.message || "Request failed");
       })
       .finally(() => {
         saveButton.disabled = false;

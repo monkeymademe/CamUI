@@ -1,0 +1,472 @@
+{% extends 'base.html' %}
+
+{% block content %}
+<style>
+  html, body, main {
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    background: #050505;
+  }
+
+  .pb-stage {
+    position: fixed;
+    inset: 0;
+    background: #050505;
+    color: #fff;
+    user-select: none;
+    -webkit-user-select: none;
+  }
+
+  .pb-feed-wrap {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #050505;
+  }
+
+  #videoFeed {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    background: #000;
+  }
+
+  .pb-btn {
+    width: 3rem;
+    height: 3rem;
+    border-radius: 999px;
+    border: 1px solid rgba(255,255,255,0.25);
+    background: rgba(20,20,20,0.55);
+    color: #fff;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(8px);
+    transition: background 0.15s ease, transform 0.15s ease;
+  }
+
+  .pb-btn:hover {
+    background: rgba(40,40,40,0.75);
+    color: #fff;
+  }
+
+  .pb-btn:active {
+    transform: scale(0.96);
+  }
+
+  .pb-fullscreen-hit {
+    position: absolute;
+    top: 0;
+    right: 0;
+    z-index: 26;
+    width: clamp(3.5rem, 8vmin, 5.5rem);
+    height: clamp(3.5rem, 8vmin, 5.5rem);
+    margin: clamp(0.4rem, 1.2vmin, 1rem);
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: transparent;
+    opacity: 0;
+    cursor: pointer;
+  }
+
+  .pb-dock {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 20;
+    padding: clamp(1.25rem, 4vmin, 3rem) clamp(1rem, 3vmin, 2.5rem) calc(clamp(1.5rem, 4.5vmin, 3.25rem) + env(safe-area-inset-bottom, 0px));
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: clamp(0.6rem, 2vmin, 1.25rem);
+    background: linear-gradient(to top, rgba(0,0,0,0.7), transparent);
+  }
+
+  .pb-hint {
+    font-size: clamp(1rem, 2.8vmin, 2rem);
+    opacity: 0.8;
+    text-shadow: 0 1px 6px rgba(0,0,0,0.7);
+    min-height: 1.4em;
+  }
+
+  .pb-shutter {
+    width: clamp(5.5rem, 14vmin, 10rem);
+    height: clamp(5.5rem, 14vmin, 10rem);
+    border-radius: 999px;
+    border: clamp(3px, 0.55vmin, 6px) solid #fff;
+    background: transparent;
+    padding: 0;
+    display: grid;
+    place-items: center;
+    box-shadow: 0 clamp(6px, 1.2vmin, 14px) clamp(18px, 3.5vmin, 36px) rgba(0,0,0,0.45);
+    transition: transform 0.12s ease, opacity 0.15s ease;
+  }
+
+  .pb-shutter::after {
+    content: "";
+    width: 76%;
+    height: 76%;
+    border-radius: 999px;
+    background: #fff;
+    transition: transform 0.12s ease, background 0.12s ease;
+  }
+
+  .pb-shutter:hover::after {
+    background: #f2f2f2;
+  }
+
+  .pb-shutter:active {
+    transform: scale(0.96);
+  }
+
+  .pb-shutter:active::after {
+    transform: scale(0.92);
+  }
+
+  .pb-shutter:disabled {
+    opacity: 0.45;
+    pointer-events: none;
+  }
+
+  .pb-countdown {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    background: radial-gradient(circle at center, rgba(0,0,0,0.15), rgba(0,0,0,0.35));
+  }
+
+  .pb-countdown.active {
+    display: flex;
+  }
+
+  .pb-count {
+    font-size: clamp(6rem, 28vmin, 16rem);
+    font-weight: 700;
+    line-height: 1;
+    color: #fff;
+    text-shadow: 0 0 40px rgba(0,0,0,0.55), 0 8px 24px rgba(0,0,0,0.45);
+    animation: pb-pop 0.85s ease;
+  }
+
+  @keyframes pb-pop {
+    0% { transform: scale(0.55); opacity: 0; }
+    25% { transform: scale(1.08); opacity: 1; }
+    100% { transform: scale(1); opacity: 0.92; }
+  }
+
+  .pb-flash {
+    position: absolute;
+    inset: 0;
+    z-index: 40;
+    background: #fff;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .pb-flash.fire {
+    animation: pb-flash 0.45s ease-out;
+  }
+
+  @keyframes pb-flash {
+    0% { opacity: 0.95; }
+    100% { opacity: 0; }
+  }
+
+  .pb-review {
+    position: absolute;
+    inset: 0;
+    z-index: 35;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0,0,0,0.82);
+    flex-direction: column;
+    gap: clamp(0.75rem, 2.5vmin, 1.5rem);
+    padding: clamp(1rem, 4vmin, 2.5rem);
+  }
+
+  .pb-review.active {
+    display: flex;
+  }
+
+  .pb-review img {
+    max-width: min(92vw, 1100px);
+    max-height: 72vh;
+    object-fit: contain;
+    border-radius: 0.5rem;
+    box-shadow: 0 16px 48px rgba(0,0,0,0.55);
+    background: #111;
+  }
+
+  .pb-review-label {
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    font-size: clamp(0.95rem, 2.6vmin, 1.75rem);
+    opacity: 0.85;
+  }
+
+  .pb-busy {
+    position: absolute;
+    inset: 0;
+    z-index: 32;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0,0,0,0.35);
+    flex-direction: column;
+    gap: clamp(0.6rem, 2vmin, 1.25rem);
+  }
+
+  .pb-busy.active {
+    display: flex;
+  }
+
+  .pb-busy .pb-hint {
+    font-size: clamp(1rem, 2.8vmin, 2rem);
+  }
+
+  .pb-spinner {
+    width: clamp(2.75rem, 7vmin, 4.5rem);
+    height: clamp(2.75rem, 7vmin, 4.5rem);
+    border: clamp(3px, 0.45vmin, 5px) solid rgba(255,255,255,0.25);
+    border-top-color: #fff;
+    border-radius: 999px;
+    animation: pb-spin 0.8s linear infinite;
+  }
+
+  @keyframes pb-spin {
+    to { transform: rotate(360deg); }
+  }
+
+  #streamStatusBanner {
+    position: absolute;
+    top: 1rem;
+    left: 1rem;
+    right: 1rem;
+    z-index: 25;
+    margin-bottom: 0 !important;
+    font-size: clamp(0.85rem, 2vmin, 1.25rem);
+  }
+</style>
+
+<div class="pb-stage" id="photobooth">
+  {% include "_stream_status.html" %}
+
+  <div class="pb-feed-wrap">
+    <img id="videoFeed" src="/video_feed_{{ camera.Num }}" alt="Live preview">
+  </div>
+
+  <button type="button" class="pb-fullscreen-hit" id="fullscreenButton" title="Fullscreen" aria-label="Fullscreen"></button>
+
+  <div class="pb-countdown" id="countdownOverlay" aria-live="polite">
+    <div class="pb-count" id="countdownNumber">3</div>
+  </div>
+
+  <div class="pb-busy" id="busyOverlay">
+    <div class="pb-spinner"></div>
+    <div class="pb-hint">Capturing…</div>
+  </div>
+
+  <div class="pb-flash" id="flashOverlay"></div>
+
+  <div class="pb-review" id="reviewOverlay">
+    <div class="pb-review-label" id="reviewLabel">Looking good</div>
+    <img id="reviewImage" alt="Captured photo">
+    <div class="pb-hint" id="reviewHint">Next photo in a moment…</div>
+  </div>
+
+  <div class="pb-dock" id="dock">
+    <div class="pb-hint" id="statusHint">Tap to take a photo</div>
+    <button type="button" class="pb-shutter" id="shutterButton" aria-label="Take photo"></button>
+  </div>
+</div>
+
+<script>
+(function () {
+  const cameraNum = {{ camera.Num }};
+  const COUNTDOWN_FROM = 3;
+  const REVIEW_MS = 4500;
+  const REVIEW_PHRASES = {{ photobooth_print_settings.fun_lines | tojson }};
+
+  const shutterButton = document.getElementById("shutterButton");
+  const fullscreenButton = document.getElementById("fullscreenButton");
+  const countdownOverlay = document.getElementById("countdownOverlay");
+  const countdownNumber = document.getElementById("countdownNumber");
+  const flashOverlay = document.getElementById("flashOverlay");
+  const busyOverlay = document.getElementById("busyOverlay");
+  const reviewOverlay = document.getElementById("reviewOverlay");
+  const reviewImage = document.getElementById("reviewImage");
+  const reviewLabel = document.getElementById("reviewLabel");
+  const statusHint = document.getElementById("statusHint");
+  const dock = document.getElementById("dock");
+  const videoFeed = document.getElementById("videoFeed");
+
+  let busy = false;
+  let lastReviewPhrase = "";
+
+  function pickReviewPhrase() {
+    const phrases = (REVIEW_PHRASES && REVIEW_PHRASES.length) ? REVIEW_PHRASES : ["Looking good"];
+    let phrase = phrases[Math.floor(Math.random() * phrases.length)];
+    if (phrases.length > 1) {
+      let guard = 0;
+      while (phrase === lastReviewPhrase && guard < 8) {
+        phrase = phrases[Math.floor(Math.random() * phrases.length)];
+        guard += 1;
+      }
+    }
+    lastReviewPhrase = phrase;
+    return phrase;
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function setChromeVisible(visible) {
+    dock.style.opacity = visible ? "1" : "0";
+    dock.style.pointerEvents = visible ? "auto" : "none";
+  }
+
+  function reloadVideoFeed() {
+    videoFeed.src = `/video_feed_${cameraNum}?t=${Date.now()}`;
+  }
+
+  function fireFlash() {
+    flashOverlay.classList.remove("fire");
+    void flashOverlay.offsetWidth;
+    flashOverlay.classList.add("fire");
+  }
+
+  async function runCountdown() {
+    countdownOverlay.classList.add("active");
+    statusHint.textContent = "Get ready…";
+
+    for (let n = COUNTDOWN_FROM; n >= 1; n--) {
+      countdownNumber.textContent = String(n);
+      countdownNumber.style.animation = "none";
+      void countdownNumber.offsetWidth;
+      countdownNumber.style.animation = "";
+      await sleep(1000);
+    }
+
+    countdownOverlay.classList.remove("active");
+  }
+
+  async function capturePhoto(funLine) {
+    const response = await fetch(`/photobooth_capture_${cameraNum}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-cache",
+      },
+      body: JSON.stringify({ photobooth: true, fun_line: funLine || "" }),
+      cache: "no-store",
+    });
+    const data = await response.json();
+    if (!response.ok || !data.success) {
+      throw new Error(data.message || "Capture failed");
+    }
+    return data;
+  }
+
+  function showReview(imageName, printQueued, printError, printPrinted, funLine) {
+    reviewImage.src = `/static/gallery/${imageName}.jpg?t=${Date.now()}`;
+    reviewLabel.textContent = funLine || pickReviewPhrase();
+    const reviewHint = document.getElementById("reviewHint");
+    if (printError) {
+      reviewHint.textContent = `Print failed (photo saved): ${printError}`;
+    } else if (printPrinted || printQueued) {
+      reviewHint.textContent = "Printed — next photo in a moment…";
+    } else {
+      reviewHint.textContent = "Next photo in a moment…";
+    }
+    reviewOverlay.classList.add("active");
+  }
+
+  function hideReview() {
+    reviewOverlay.classList.remove("active");
+    reviewImage.removeAttribute("src");
+  }
+
+  async function takePhoto() {
+    if (busy) return;
+    busy = true;
+    shutterButton.disabled = true;
+    setChromeVisible(false);
+
+    try {
+      await runCountdown();
+
+      fireFlash();
+      busyOverlay.classList.add("active");
+      document.querySelector("#busyOverlay .pb-hint").textContent = "Capturing…";
+      statusHint.textContent = "Capturing…";
+
+      const funLine = pickReviewPhrase();
+      const result = await capturePhoto(funLine);
+      const imageName = result.image;
+
+      busyOverlay.classList.remove("active");
+      showReview(
+        imageName,
+        result.print_queued,
+        result.print_error,
+        result.print_printed,
+        result.fun_line || funLine
+      );
+      reloadVideoFeed();
+      await sleep(REVIEW_MS);
+      hideReview();
+      statusHint.textContent = "Tap to take a photo";
+    } catch (err) {
+      console.error(err);
+      countdownOverlay.classList.remove("active");
+      busyOverlay.classList.remove("active");
+      hideReview();
+      statusHint.textContent = err.message || "Capture failed — try again";
+      reloadVideoFeed();
+    } finally {
+      busy = false;
+      shutterButton.disabled = false;
+      setChromeVisible(true);
+    }
+  }
+
+  function toggleFullscreen() {
+    const elem = document.documentElement;
+    if (!document.fullscreenElement && !document.webkitFullscreenElement) {
+      if (elem.requestFullscreen) elem.requestFullscreen();
+      else if (elem.webkitRequestFullscreen) elem.webkitRequestFullscreen();
+    } else if (document.exitFullscreen) {
+      document.exitFullscreen();
+    } else if (document.webkitExitFullscreen) {
+      document.webkitExitFullscreen();
+    }
+  }
+
+  shutterButton.addEventListener("click", takePhoto);
+  fullscreenButton.addEventListener("click", toggleFullscreen);
+
+  // Keyboard: Space / Enter to shoot, Esc to leave
+  document.addEventListener("keydown", (event) => {
+    if (event.key === " " || event.key === "Enter") {
+      event.preventDefault();
+      takePhoto();
+    } else if (event.key === "Escape" && !document.fullscreenElement) {
+      window.location.href = "/";
+    } else if (event.key === "f" || event.key === "F") {
+      toggleFullscreen();
+    }
+  });
+})();
+</script>
+{% endblock %}
